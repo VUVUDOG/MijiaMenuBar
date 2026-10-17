@@ -408,6 +408,9 @@ def main(argv=None):
             status("complete", "设备状态已更新")
     except StaleSession:
         return 0
+    except BrokenPipeError:
+        # The app quit while this run was still talking to it; nothing to report.
+        return 0
     except KeyringError:
         status("error", "钥匙串未授权，请允许访问后手动刷新，或重新扫码登录", reason="keychain_access")
         return 1
