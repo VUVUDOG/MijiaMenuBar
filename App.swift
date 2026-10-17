@@ -976,8 +976,8 @@ struct QuietIconStyle: ButtonStyle {
 struct ControlView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var updater = Updater.shared
-    @State private var draft = 26.0
-    @State private var expandedID: String?
+    @State private var detailID: String?
+    @State private var climateExpanded = false
     @State private var confirmOffAll = false
     static let accent = Color(red: 0.45, green: 0.84, blue: 0.77)
 
@@ -1051,175 +1051,273 @@ struct ControlView: View {
         }
     }
 
-    var favoritesHeight: CGFloat {
-        let count = model.favoriteAccessories.count
-        return count == 0 ? 0 : CGFloat((count + 1) / 2) * 44 + 24
+    // MARK: Layout constants (fixed heights keep the scroll area's size exact)
+
+    static let tileHeight: CGFloat = 52
+    static let gridSpacing: CGFloat = 6
+    static let sectionSpacing: CGFloat = 12
+
+    static func pairs(_ items: [Accessory]) -> [[Accessory]] {
+        stride(from: 0, to: items.count, by: 2).map { Array(items[$0..<min($0 + 2, items.count)]) }
     }
 
-    // Starred devices, reachable without switching rooms. Click switches; right-click removes.
+    static func gridHeight(_ items: [Accessory], detail: String?) -> CGFloat {
+        guard !items.isEmpty else { return 0 }
+        let rows = CGFloat(pairs(items).count)
+        var height = rows * tileHeight + (rows - 1) * gridSpacing
+        if let id = detail, let item = items.first(where: { $0.id == id }), item.online {
+            height += gridSpacing + AccessoryDetail.height(item)
+        }
+        return height
+    }
+
+    static func climateHeight(_ room: RoomReading, expanded: Bool) -> CGFloat {
+        var height: CGFloat = 32 + 20
+        if room.indoor != nil { height += 6 + 14 }
+        if expanded { height += 10 + (room.modes.isEmpty ? 0 : 44) + (room.fans.isEmpty ? 0 : 8 + 28) }
+        return height
+    }
+
+    // MARK: Favourites
+
     var favoritesSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("常用").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).frame(height: 12)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
-                ForEach(model.favoriteAccessories) { item in
-                    let on = item.isOn == true
-                    Button { model.quickToggle(item) } label: {
-                        HStack(spacing: 7) {
-                            Image(systemName: AccessoryRow.icon(item)).font(.system(size: 11))
-                                .foregroundStyle(on ? Self.accent : .white.opacity(0.5)).frame(width: 16)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(item.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
-                                Text(item.online ? item.room : "离线").font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
-                            }
-                            Spacer(minLength: 0)
-                        }.foregroundStyle(on ? Self.accent : .white.opacity(0.7))
-                            .padding(.horizontal, 9).frame(height: 38).modifier(Surface(selected: on, radius: 10))
-                            .opacity(item.online ? 1 : 0.5)
-                    }.buttonStyle(.plain).disabled(!item.online)
-                        .contextMenu { Button("移出常用") { model.toggleFavorite(item.id) } }
-                }
-            }
+            tileGrid(model.favoriteAccessories, favorites: true)
         }
     }
+    var favoritesHeight: CGFloat {
+        let items = model.favoriteAccessories
+        return items.isEmpty ? 0 : 12 + 6 + Self.gridHeight(items, detail: nil)
+    }
+
+    // MARK: Rooms — one scrollable row
 
     var roomTabs: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
-            ForEach(model.areas, id: \.self) { name in
-                let selected = model.area == name
-                Button { model.selectArea(name) } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 5) {
-                            Image(systemName: roomIcon(name)).font(.system(size: 11)).frame(width: 14)
-                            Text(name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                        }
-                        HStack(spacing: 4) {
-                            Circle().fill(model.areaActive(name) ? Self.accent : Color.white.opacity(0.2)).frame(width: 5, height: 5)
-                            Text(model.areaTemperature(name).map { String(format: "%.1f°", $0) } ?? " ")
-                                .font(.system(size: 10)).monospacedDigit().foregroundStyle(.white.opacity(selected ? 0.75 : 0.45))
-                        }
-                    }.foregroundStyle(selected ? Self.accent : .white.opacity(0.65))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 9).padding(.vertical, 8).modifier(Surface(selected: selected, radius: 11))
-                }.buttonStyle(.plain)
-            }
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(model.areas, id: \.self) { name in
+                        let selected = model.area == name
+                        Button { model.selectArea(name) } label: {
+                            HStack(spacing: 5) {
+                                Circle().fill(model.areaActive(name) ? Self.accent : Color.white.opacity(0.22)).frame(width: 5, height: 5)
+                                Text(name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                if let temperature = model.areaTemperature(name) {
+                                    Text(String(format: "%.1f°", temperature)).font(.system(size: 10)).monospacedDigit()
+                                        .foregroundStyle(.white.opacity(selected ? 0.75 : 0.45))
+                                }
+                            }.foregroundStyle(selected ? Self.accent : .white.opacity(0.7))
+                                .padding(.horizontal, 10).frame(height: 30).modifier(Surface(selected: selected, radius: 15))
+                        }.buttonStyle(.plain).id(name)
+                    }
+                }
+            }.frame(height: 30)
+                .onAppear { proxy.scrollTo(model.area, anchor: .center) }
+                .onChange(of: model.area) { name in withAnimation { proxy.scrollTo(name, anchor: .center) } }
         }
     }
 
-    // The device list scrolls inside a height that leaves room for the rest of the panel.
-    func accessoryList(_ items: [Accessory], withClimate: Bool) -> some View {
-        let screen = NSScreen.main?.visibleFrame.height ?? 900
-        // About 700pt (with an air conditioner card) or 300pt (without) is used by the rest of the panel.
-        let cap = max(150, min(withClimate ? 360 : 640, screen - (withClimate ? 720 : 310) - favoritesHeight))
-        let content = items.reduce(0) { $0 + AccessoryRow.height($1, expanded: expandedID == $1.id) + 6 }
-        return VStack(alignment: .leading, spacing: 8) {
+    // MARK: Air conditioner — one line, expand for mode and fan
+
+    func climateSummary(_ room: RoomReading) -> String {
+        guard let power = room.power else { return "状态暂不可用" }
+        let target = room.target.map { "设定 \(Int($0))°" }
+        if !power { return ["已关机", target].compactMap { $0 }.joined(separator: " · ") }
+        let mode = room.modes.first { $0.id == room.mode }?.label
+        let fan = room.fans.first { $0.id == room.fan }?.label
+        return [target, mode, fan].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    // Lets the native layout tests render the card in either state.
+    func climateCardForTesting(_ room: RoomReading, expanded: Bool) -> some View {
+        var view = self
+        view._climateExpanded = State(initialValue: expanded)
+        return view.climateCard(room)
+    }
+
+    func climateCard(_ room: RoomReading) -> some View {
+        let on = room.power == true
+        let modeLabel = room.modes.first { $0.id == room.mode }?.label ?? ""
+        return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text("设备").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                Text(model.favorites.isEmpty ? "\(items.count) 个 · 右键加入常用" : "\(items.count) 个")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
-                Spacer()
-                let count = model.offTargets(model.area).count
-                if count > 0 {
-                    Button { model.turnOff(area: model.area) } label: {
-                        Label("全关", systemImage: "power").font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 9).frame(height: 20)
-                            .modifier(Surface(radius: 10))
-                    }.buttonStyle(.plain).help("关闭本房间的灯、风扇、净化器、浴霸和空调（不含插座、窗帘）")
-                }
-            }.frame(height: 20)
-            ScrollView(.vertical, showsIndicators: content > cap) {
-                VStack(spacing: 6) {
-                    ForEach(items) { item in
-                        AccessoryRow(item: item, model: model, expanded: expandedID == item.id) {
-                            expandedID = expandedID == item.id ? nil : item.id
+                HStack(spacing: 8) {
+                    Image(systemName: on ? modeIcon(modeLabel) : "air.conditioner.horizontal").font(.system(size: 13))
+                        .foregroundStyle(on ? Self.accent : .white.opacity(0.55)).frame(width: 28, height: 28)
+                        .background(on ? Self.accent.opacity(0.14) : Color.white.opacity(0.05), in: Circle())
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Text(room.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                            Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.4)).rotationEffect(.degrees(climateExpanded ? 180 : 0))
+                        }
+                        Text(climateSummary(room)).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }.contentShape(Rectangle()).onTapGesture { climateExpanded.toggle() }
+                let writable = room.writable.contains("target-temperature")
+                Button { model.set("target-temperature", value: max(room.minimum, (room.target ?? 26) - room.step), delay: 0.6) } label: {
+                    Image(systemName: "minus").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
+                }.buttonStyle(QuietIconStyle()).help("降低温度").accessibilityLabel("降低温度")
+                    .disabled(!writable || (room.target ?? room.minimum) <= room.minimum)
+                Text(room.target.map { "\(Int($0))°" } ?? "—").font(.system(size: 15, weight: .medium, design: .rounded))
+                    .monospacedDigit().frame(width: 32)
+                Button { model.set("target-temperature", value: min(room.maximum, (room.target ?? 26) + room.step), delay: 0.6) } label: {
+                    Image(systemName: "plus").font(.system(size: 11, weight: .semibold)).frame(width: 26, height: 26)
+                }.buttonStyle(QuietIconStyle()).help("提高温度").accessibilityLabel("提高温度")
+                    .disabled(!writable || (room.target ?? room.maximum) >= room.maximum)
+                Button { model.set("on", value: !(room.power ?? false)) } label: {
+                    Image(systemName: "power").font(.system(size: 12, weight: .semibold)).frame(width: 30, height: 30)
+                        .foregroundStyle(on ? Self.accent : .white.opacity(0.6))
+                        .background(on ? Self.accent.opacity(0.16) : Color.white.opacity(0.055), in: Circle())
+                }.buttonStyle(.plain).disabled(!room.writable.contains("on"))
+                    .help(on ? "关闭空调" : "开启空调").accessibilityLabel(on ? "关闭空调" : "开启空调")
+            }.frame(height: 32)
+            if let indoor = room.indoor {
+                HStack(spacing: 4) {
+                    Image(systemName: "thermometer.medium").font(.system(size: 9))
+                    Text("室温 " + String(format: "%.1f°", indoor) + (room.humidity.map { " · 湿度 \(Int($0.rounded()))%" } ?? ""))
+                        .font(.system(size: 10)).monospacedDigit()
+                }.foregroundStyle(.white.opacity(0.6)).frame(height: 14).padding(.leading, 36)
+            }
+            if climateExpanded {
+                VStack(spacing: 8) {
+                    if !room.modes.isEmpty {
+                        HStack(spacing: 5) {
+                            ForEach(room.modes) { option in
+                                let selected = room.mode == option.id
+                                Button { model.set("mode", value: option.id) } label: {
+                                    VStack(spacing: 3) {
+                                        Image(systemName: modeIcon(option.label)).font(.system(size: 12))
+                                        Text(option.label).font(.system(size: 10, weight: .medium))
+                                    }.foregroundStyle(selected ? Self.accent : .white.opacity(0.6))
+                                        .frame(maxWidth: .infinity).frame(height: 44).modifier(Surface(selected: selected, radius: 9))
+                                }.buttonStyle(.plain).disabled(!room.writable.contains("mode"))
+                            }
                         }
                     }
+                    if !room.fans.isEmpty {
+                        HStack(spacing: 5) {
+                            ForEach(room.fans) { option in
+                                let selected = room.fan == option.id
+                                Button { model.set("fan-level", value: option.id) } label: {
+                                    Text(option.label).font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(selected ? Self.accent : .white.opacity(0.6))
+                                        .frame(maxWidth: .infinity).frame(height: 28).modifier(Surface(selected: selected, radius: 8))
+                                }.buttonStyle(.plain).disabled(!room.writable.contains("fan-level"))
+                            }
+                        }
+                    }
+                }.padding(.top, 4)
+            }
+        }.padding(.horizontal, 10).padding(.vertical, 10).modifier(Surface(radius: 12))
+    }
+
+    // MARK: Devices — two-column tiles; click switches, the slider icon opens controls
+
+    func tile(_ item: Accessory, favorites: Bool) -> some View {
+        let on = item.isOn == true
+        let hasControls = item.online && !AccessoryDetail.controls(item).isEmpty
+        let key = (favorites ? "fav-" : "") + item.id
+        return HStack(spacing: 7) {
+            HStack(spacing: 7) {
+                Image(systemName: AccessoryDetail.icon(item)).font(.system(size: 12))
+                    .foregroundStyle(on ? Self.accent : .white.opacity(0.55)).frame(width: 26, height: 26)
+                    .background(on ? Self.accent.opacity(0.14) : Color.white.opacity(0.05), in: Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 3) {
+                        Text(item.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                        if !favorites && model.favorites.contains(item.id) {
+                            Image(systemName: "star.fill").font(.system(size: 7)).foregroundStyle(Self.accent.opacity(0.8))
+                        }
+                    }
+                    Text(favorites && item.online ? "\(item.room) · \(AccessoryDetail.summary(item))" : AccessoryDetail.summary(item))
+                        .font(.system(size: 9.5)).foregroundStyle(.secondary).lineLimit(1)
                 }
-            }.frame(height: min(content, cap))
+                Spacer(minLength: 0)
+            }.contentShape(Rectangle()).onTapGesture { if item.online { model.quickToggle(item) } }
+            if hasControls && !favorites {
+                Button { detailID = detailID == key ? nil : key } label: {
+                    Image(systemName: "slider.horizontal.3").font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(detailID == key ? Self.accent : .white.opacity(0.5)).frame(width: 22, height: 22)
+                        .background(Color.white.opacity(detailID == key ? 0.1 : 0.04), in: Circle())
+                }.buttonStyle(.plain).help("调节")
+            }
+        }.padding(.horizontal, 8).frame(height: Self.tileHeight)
+            .modifier(Surface(selected: on, radius: 11)).opacity(item.online ? 1 : 0.5)
+            .contextMenu {
+                Button(model.favorites.contains(item.id) ? "移出常用" : "加入常用") { model.toggleFavorite(item.id) }
+                if hasControls && !favorites { Button("调节…") { detailID = key } }
+            }
+    }
+
+    func tileGrid(_ items: [Accessory], favorites: Bool) -> some View {
+        VStack(spacing: Self.gridSpacing) {
+            ForEach(Self.pairs(items), id: \.first!.id) { pair in
+                HStack(spacing: Self.gridSpacing) {
+                    ForEach(pair) { item in tile(item, favorites: favorites).frame(maxWidth: .infinity) }
+                    if pair.count == 1 { Color.clear.frame(maxWidth: .infinity, maxHeight: 1) }
+                }
+                if !favorites, let open = pair.first(where: { $0.id == detailID }), open.online {
+                    AccessoryDetail(item: open, model: model)
+                }
+            }
         }
     }
 
-    func temperatureCard(_ room: RoomReading) -> some View {
-        VStack(spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(room.name).font(.system(size: 15, weight: .semibold))
-                    HStack(spacing: 5) {
-                        Circle().fill(room.power == true ? Self.accent : .secondary).frame(width: 4, height: 4)
-                        Text(room.power.map { $0 ? "正在运行" : "已关机" } ?? "状态暂不可用")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    if let indoor = room.indoor {
-                        HStack(spacing: 4) {
-                            Image(systemName: "thermometer.medium").font(.system(size: 10))
-                            Text("室温 " + String(format: "%.1f°", indoor) + (room.humidity.map { " · 湿度 \(Int($0.rounded()))%" } ?? ""))
-                                .font(.system(size: 11)).monospacedDigit()
-                        }.foregroundStyle(.white.opacity(0.7))
-                    }
-                }
-                Spacer()
-                Button { model.set("on", value: !(room.power ?? false)) } label: {
-                    Image(systemName: "power").font(.system(size: 18, weight: .medium)).frame(width: 42, height: 42)
-                        .foregroundStyle(room.power == true ? Self.accent : .white.opacity(0.6))
-                        .background(room.power == true ? Self.accent.opacity(0.16) : Color.white.opacity(0.055), in: Circle())
-                        .overlay(Circle().strokeBorder(Color.white.opacity(0.06)))
-                }.buttonStyle(.plain).disabled(!room.writable.contains("on"))
-                    .help(room.power == true ? "关闭空调" : "开启空调")
-                    .accessibilityLabel(room.power == true ? "关闭空调" : "开启空调")
-            }
-            VStack(spacing: 1) {
-                HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text(room.target == nil ? "—" : "\(Int(draft))")
-                        .font(.system(size: 64, weight: .light, design: .rounded)).monospacedDigit()
-                    Text("°C").font(.system(size: 24, weight: .light)).foregroundStyle(.white.opacity(0.55))
-                }
-                Text("设定温度").font(.system(size: 11)).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity)
-            HStack(spacing: 12) {
-                Button { model.set("target-temperature", value: max(room.minimum, (room.target ?? draft) - room.step), delay: 0.6) } label: {
-                    Image(systemName: "minus").font(.system(size: 13, weight: .medium)).frame(width: 32, height: 32)
-                }.buttonStyle(QuietIconStyle()).help("降低温度").accessibilityLabel("降低温度")
-                    .disabled(!room.writable.contains("target-temperature") || (room.target ?? room.minimum) <= room.minimum)
-                Slider(value: $draft, in: room.minimum...room.maximum, step: room.step) { editing in
-                    if !editing { model.set("target-temperature", value: draft, delay: 0.3) }
-                }.tint(Self.accent).disabled(!room.writable.contains("target-temperature"))
-                    .accessibilityLabel("设定温度")
-                Button { model.set("target-temperature", value: min(room.maximum, (room.target ?? draft) + room.step), delay: 0.6) } label: {
-                    Image(systemName: "plus").font(.system(size: 13, weight: .medium)).frame(width: 32, height: 32)
-                }.buttonStyle(QuietIconStyle()).help("提高温度").accessibilityLabel("提高温度")
-                    .disabled(!room.writable.contains("target-temperature") || (room.target ?? room.maximum) >= room.maximum)
-            }
-        }.padding(16)
-            .background(LinearGradient(colors: [Self.accent.opacity(0.055), Color.white.opacity(0.02)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.white.opacity(0.075)))
+    // Everything below the room row scrolls once the panel would pass 80% of the screen.
+    var middleHeight: CGFloat {
+        let items = model.areaAccessories
+        var height: CGFloat = 0
+        if let room = model.areaRoom {
+            height += Self.climateHeight(room, expanded: climateExpanded)
+            if room.message != nil { height += Self.sectionSpacing + 16 }
+        }
+        if !items.isEmpty {
+            if height > 0 { height += Self.sectionSpacing }
+            height += 20 + 8 + Self.gridHeight(items, detail: detailID)
+        }
+        return height
     }
 
-    func options(_ room: RoomReading) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("运行模式").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                ForEach(room.modes) { option in
-                    let selected = room.mode == option.id
-                    Button { model.set("mode", value: option.id) } label: {
-                        VStack(spacing: 7) {
-                            Image(systemName: modeIcon(option.label)).font(.system(size: 15)).frame(height: 18)
-                            Text(option.label).font(.system(size: 11, weight: .medium))
-                        }.foregroundStyle(selected ? Self.accent : .white.opacity(0.6))
-                            .frame(maxWidth: .infinity).padding(.vertical, 9).modifier(Surface(selected: selected, radius: 10))
-                    }.buttonStyle(.plain).disabled(!room.writable.contains("mode"))
+    var middleCap: CGFloat {
+        let screen = NSScreen.main?.visibleFrame.height ?? 900
+        let top: CGFloat = 10 + 38 + Self.sectionSpacing + (favoritesHeight > 0 ? favoritesHeight + Self.sectionSpacing : 0)
+            + 30 + Self.sectionSpacing
+        let bottom: CGFloat = Self.sectionSpacing + 1 + Self.sectionSpacing + 36 + 10
+            + (updater.latest != nil || updater.note != nil ? 46 : 0)
+        return max(160, screen * 0.8 - top - bottom)
+    }
+
+    var middleSection: some View {
+        let items = model.areaAccessories
+        return ScrollView(.vertical, showsIndicators: middleHeight > middleCap) {
+            VStack(alignment: .leading, spacing: Self.sectionSpacing) {
+                if let room = model.areaRoom {
+                    climateCard(room)
+                    if let message = room.message { Text(message).font(.caption).foregroundStyle(.secondary).frame(height: 16) }
+                }
+                if !items.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Text("设备").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                            Text(model.favorites.isEmpty ? "\(items.count) 个 · 右键加入常用" : "\(items.count) 个")
+                                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                            Spacer()
+                            let count = model.offTargets(model.area).count
+                            if count > 0 {
+                                Button { model.turnOff(area: model.area) } label: {
+                                    Label("全关", systemImage: "power").font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 9).frame(height: 20)
+                                        .modifier(Surface(radius: 10))
+                                }.buttonStyle(.plain).help("关闭本房间的灯、风扇、净化器、浴霸和空调（不含插座、窗帘）")
+                            }
+                        }.frame(height: 20)
+                        tileGrid(items, favorites: false)
+                    }
                 }
             }
-            Text("风量").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).padding(.top, 5)
-            HStack(spacing: 6) {
-                ForEach(room.fans) { option in
-                    let selected = room.fan == option.id
-                    Button { model.set("fan-level", value: option.id) } label: {
-                        Text(option.label).font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(selected ? Self.accent : .white.opacity(0.6))
-                            .frame(maxWidth: .infinity).padding(.vertical, 9).modifier(Surface(selected: selected, radius: 9))
-                    }.buttonStyle(.plain).disabled(!room.writable.contains("fan-level"))
-                }
-            }
-        }
+        }.frame(height: min(middleHeight, middleCap))
     }
 
     var loginContent: some View {
@@ -1231,7 +1329,7 @@ struct ControlView: View {
                 }
                 Image(nsImage: qr).resizable().interpolation(.none).frame(width: 232, height: 232)
                     .padding(10).background(.white, in: RoundedRectangle(cornerRadius: 14))
-                Text("请使用已关联日立设备的米家账号").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("请使用设备所在的米家账号").font(.system(size: 11)).foregroundStyle(.secondary)
                 Button("取消登录") { model.logout() }.buttonStyle(.plain).foregroundStyle(.secondary).font(.system(size: 12))
             } else if model.busy {
                 ProgressView().controlSize(.small)
@@ -1240,7 +1338,7 @@ struct ControlView: View {
                 Image(systemName: "qrcode.viewfinder").font(.system(size: 32, weight: .light)).foregroundStyle(Self.accent).padding(.top, 8)
                 VStack(spacing: 7) {
                     Text(model.authState == "authenticated" ? "已连接米家" : "连接家中的舒适").font(.system(size: 17, weight: .semibold))
-                    Text(model.authState == "authenticated" ? "同步房间，获取空调设备和状态" : "登录米家，在菜单栏控制各房间空调").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(model.authState == "authenticated" ? "同步房间，获取家中设备和状态" : "登录米家，在菜单栏控制家中设备").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Button { if model.authState == "authenticated" { model.resync() } else { model.login() } } label: {
                     Text(model.authState == "authenticated" ? "同步房间" : "扫码登录米家").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(red: 0.07, green: 0.16, blue: 0.14))
@@ -1284,18 +1382,12 @@ struct ControlView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: Self.sectionSpacing) {
             header
             if model.hasDevices {
                 if !model.favoriteAccessories.isEmpty { favoritesSection }
                 roomTabs
-                if let room = model.areaRoom {
-                    temperatureCard(room)
-                    options(room)
-                    if let message = room.message { Text(message).font(.caption).foregroundStyle(.secondary) }
-                }
-                let items = model.areaAccessories
-                if !items.isEmpty { accessoryList(items, withClimate: model.areaRoom != nil) }
+                if model.areaRoom != nil || !model.areaAccessories.isEmpty { middleSection }
             } else { loginContent }
             if updater.latest != nil || updater.note != nil { updateBanner }
             Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
@@ -1305,9 +1397,7 @@ struct ControlView: View {
             .preferredColorScheme(.dark)
             .background(Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 20))
-            .onAppear { draft = model.selected?.target ?? 26 }
-            .onChange(of: model.selectedID) { _ in draft = model.selected?.target ?? 26 }
-            .onChange(of: model.selected?.target) { value in draft = value ?? 26 }
+            .onChange(of: model.area) { _ in detailID = nil; climateExpanded = false }
     }
 }
 
@@ -1315,15 +1405,13 @@ func symbol(_ name: String, fallback: String) -> String {
     NSImage(systemSymbolName: name, accessibilityDescription: nil) == nil ? fallback : name
 }
 
-struct AccessoryRow: View {
+// Controls shown under a tile, plus text helpers shared by tiles and favourites.
+struct AccessoryDetail: View {
     let item: Accessory
     @ObservedObject var model: AppModel
-    let expanded: Bool
-    let onTap: () -> Void
     @State private var drafts: [String: Double] = [:]
 
     // Fixed element heights keep the scroll area's measured height exact.
-    static let rowHeight: CGFloat = 46
     static func controls(_ item: Accessory) -> [AccessoryProp] {
         item.props.filter { $0.writable && $0.address != item.primary }
     }
@@ -1333,13 +1421,11 @@ struct AccessoryRow: View {
         if !prop.options.isEmpty { return prop.options.count > 4 ? 66 : 44 }
         return 42
     }
-    static func height(_ item: Accessory, expanded: Bool) -> CGFloat {
-        guard expanded, item.online else { return rowHeight }
+    static func height(_ item: Accessory) -> CGFloat {
         let parts = controls(item)
-        return rowHeight + parts.reduce(0) { $0 + controlHeight($1) } + CGFloat(parts.count) * 8
+        return 20 + parts.reduce(0) { $0 + controlHeight($1) } + CGFloat(max(parts.count - 1, 0)) * 8
     }
 
-    var icon: String { Self.icon(item) }
     static func icon(_ item: Accessory) -> String {
         switch item.kind {
         case "light": return item.group ? symbol("lightbulb.2", fallback: "lightbulb") : "lightbulb"
@@ -1351,7 +1437,8 @@ struct AccessoryRow: View {
         }
     }
 
-    func label(_ prop: AccessoryProp) -> String {
+    func label(_ prop: AccessoryProp) -> String { Self.label(prop) }
+    static func label(_ prop: AccessoryProp) -> String {
         let (service, field) = { () -> (String, String) in
             let parts = prop.address.split(separator: ".", maxSplits: 1).map(String.init)
             return (parts[0], parts.count > 1 ? parts[1] : "")
@@ -1367,12 +1454,12 @@ struct AccessoryRow: View {
         return "\(Int(value))%"
     }
 
-    func option(_ address: String) -> String? {
+    static func option(_ item: Accessory, _ address: String) -> String? {
         guard let prop = item.prop(address), let value = item.number(address) else { return nil }
         return prop.options.first { Double($0.id) == value }?.label
     }
 
-    var summary: String {
+    static func summary(_ item: Accessory) -> String {
         guard item.online else { return "离线" }
         if item.values.isEmpty { return "等待读取" }
         switch item.kind {
@@ -1388,55 +1475,24 @@ struct AccessoryRow: View {
             return [item.isOn == true ? "已开启" : "已关闭", item.isOn == true ? power : nil].compactMap { $0 }.joined(separator: " · ")
         case "air-purifier":
             let pm = item.number("environment.pm2.5-density").map { "PM2.5 \(Int($0))" }
-            return [item.isOn == true ? option("air-purifier.mode") ?? "已开启" : "已关闭", pm].compactMap { $0 }.joined(separator: " · ")
+            return [item.isOn == true ? option(item, "air-purifier.mode") ?? "已开启" : "已关闭", pm].compactMap { $0 }.joined(separator: " · ")
         case "fan":
             guard item.isOn == true else { return "已关闭" }
-            return [option("fan.mode"), option("fan.fan-level"), item.values["fan.horizontal-swing"]?.base as? Bool == true ? "摇头" : nil]
+            return [option(item, "fan.mode"), option(item, "fan.fan-level"), item.values["fan.horizontal-swing"]?.base as? Bool == true ? "摇头" : nil]
                 .compactMap { $0 }.joined(separator: " · ")
         default:
             let light = item.values["light.on"]?.base as? Bool == true ? "照明开" : nil
             let temp = item.number("environment.temperature").map { String(format: "%.0f°", $0) }
-            return [option("ptc-bath-heater.mode") ?? "—", light, temp].compactMap { $0 }.joined(separator: " · ")
+            return [option(item, "ptc-bath-heater.mode") ?? "—", light, temp].compactMap { $0 }.joined(separator: " · ")
         }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: icon).font(.system(size: 13))
-                    .foregroundStyle(item.isOn == true ? ControlView.accent : .white.opacity(0.55))
-                    .frame(width: 28, height: 28)
-                    .background((item.isOn == true ? ControlView.accent.opacity(0.14) : Color.white.opacity(0.05)), in: Circle())
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                        if model.favorites.contains(item.id) {
-                            Image(systemName: "star.fill").font(.system(size: 8)).foregroundStyle(ControlView.accent.opacity(0.8))
-                        }
-                    }
-                    Text(summary).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer(minLength: 4)
-                if let primary = item.primary {
-                    Toggle("", isOn: Binding(get: { item.values[primary]?.base as? Bool ?? false },
-                                             set: { model.setAccessory(item.id, primary, value: $0) }))
-                        .toggleStyle(.switch).controlSize(.mini).labelsHidden().tint(ControlView.accent)
-                        .disabled(!item.online)
-                }
-                if item.online && !Self.controls(item).isEmpty {
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.4)).rotationEffect(.degrees(expanded ? 180 : 0))
-                }
-            }.frame(height: Self.rowHeight - 16).contentShape(Rectangle()).onTapGesture { if item.online { onTap() } }
-            if expanded && item.online {
-                ForEach(Self.controls(item), id: \.address) { prop in control(prop).frame(height: Self.controlHeight(prop)) }
-            }
-        }.padding(.horizontal, 10).padding(.vertical, 8)
-            .opacity(item.online ? 1 : 0.5)
-            .modifier(Surface(radius: 11))
-            .contextMenu {
-                Button(model.favorites.contains(item.id) ? "移出常用" : "加入常用") { model.toggleFavorite(item.id) }
-            }
+        VStack(spacing: 8) {
+            ForEach(Self.controls(item), id: \.address) { prop in control(prop).frame(height: Self.controlHeight(prop)) }
+        }.padding(.horizontal, 10).padding(.vertical, 10)
+            .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 11))
+            .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(ControlView.accent.opacity(0.25)))
     }
 
     @ViewBuilder func control(_ prop: AccessoryProp) -> some View {

@@ -58,7 +58,7 @@ let signedOutHeight = hosting.fittingSize.height
 interrupted.active = true; interrupted.phase = "awaiting_scan"; interrupted.qr = NSImage(size: NSSize(width: 232, height: 232))
 RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
 let qrHeight = hosting.fittingSize.height
-expect(controlHeight > signedOutHeight + 100, "Control panel must measure its natural height")
+expect(controlHeight > 150 && abs(controlHeight - signedOutHeight) > 20, "Control panel must measure its natural height")
 expect(qrHeight > signedOutHeight + 100, "QR panel must grow to fit its content")
 expect(signedOutHeight > 200 && signedOutHeight < 450, "Signed-out panel must shrink without fixed-height padding")
 print("Native layout: control \(Int(controlHeight)) / signed out \(Int(signedOutHeight)) / QR \(Int(qrHeight)) pt")
@@ -391,13 +391,25 @@ func settleQueue(_ model: AppModel) {
 let realReport = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[3]))) as! [String: Any]
 var kinds = Set<String>()
 for raw in realReport["accessories"] as? [[String: Any]] ?? [] {
-    guard let item = AppModel.accessory(raw), item.online, kinds.insert(item.kind + "\(item.group)").inserted else { continue }
+    guard let item = AppModel.accessory(raw), item.online, kinds.insert(item.kind + "\(item.group)").inserted,
+          !AccessoryDetail.controls(item).isEmpty else { continue }
+    let detail = NSHostingView(rootView: AccessoryDetail(item: item, model: home).frame(width: 344))
+    expect(abs(detail.fittingSize.height - AccessoryDetail.height(item)) <= 1,
+        "Detail height estimate for \(item.kind): \(AccessoryDetail.height(item)) vs \(detail.fittingSize.height)")
+}
+// The compact air-conditioner card and the tile grid report their real heights.
+home.selectArea("主卧")
+if let room = home.areaRoom {
     for expanded in [false, true] {
-        let row = NSHostingView(rootView: AccessoryRow(item: item, model: home, expanded: expanded, onTap: {}).frame(width: 344))
-        let actual = row.fittingSize.height, estimate = AccessoryRow.height(item, expanded: expanded)
-        expect(abs(actual - estimate) <= 1, "Row height estimate for \(item.kind) expanded=\(expanded): \(estimate) vs \(actual)")
+        let card = NSHostingView(rootView: ClimateProbe(model: home, expanded: expanded).frame(width: 344))
+        expect(abs(card.fittingSize.height - ControlView.climateHeight(room, expanded: expanded)) <= 1,
+            "Climate card height expanded=\(expanded): \(ControlView.climateHeight(room, expanded: expanded)) vs \(card.fittingSize.height)")
     }
 }
+let gridItems = home.areaAccessories
+let grid = NSHostingView(rootView: GridProbe(model: home, items: gridItems).frame(width: 344))
+expect(abs(grid.fittingSize.height - ControlView.gridHeight(gridItems, detail: nil)) <= 1,
+    "Tile grid height: \(ControlView.gridHeight(gridItems, detail: nil)) vs \(grid.fittingSize.height)")
 print("Native accessories: rooms, groups, optimistic queue, merged commands, revert, curtain actions, turn-off batches, refresh preemption and favourites passed")
 
 let leaseRuntime = testRuntime.appendingPathComponent("lease-test")
@@ -408,3 +420,15 @@ expect(ApplicationLease(runtime: leaseRuntime) == nil, "A duplicate app instance
 lease = nil
 expect(ApplicationLease(runtime: leaseRuntime) != nil, "Exiting the app must release its lease")
 print("Native authentication: single main-app read, worker private pipes, retry suspension, revocation race, legacy migration, optimistic controls, and duplicate-instance lease passed")
+
+// Test-only wrappers exposing ControlView sections.
+struct ClimateProbe: View {
+    @ObservedObject var model: AppModel
+    let expanded: Bool
+    var body: some View { ControlView(model: model).climateCardForTesting(model.areaRoom!, expanded: expanded) }
+}
+struct GridProbe: View {
+    @ObservedObject var model: AppModel
+    let items: [Accessory]
+    var body: some View { ControlView(model: model).tileGrid(items, favorites: false) }
+}
