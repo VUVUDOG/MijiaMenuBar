@@ -13,7 +13,7 @@ for architecture, application in (("arm64", root / "dist/MijiaMenuBar.app"),
         runtime = Path(temporary)
         credentials = {"user_id": "package-test", "ssecurity": "package-test-security", "service_token": "package-test-token"}
         (runtime / "auth.json").write_text(json.dumps({"generation": "package-test", "state": "authenticated", "account": "session.mock"}))
-        (runtime / "report.json").write_text(json.dumps({"devices": [], "sensors": [], "accessories": []}))
+        (runtime / "report.json").write_text(json.dumps({"devices": [], "sensors": [], "accessories": [], "alarms": []}))
         environment = {**os.environ, "HITACHI_RUNTIME_PATH": str(runtime), "HITACHI_AUTH_GENERATION": "package-test"}
         response = subprocess.run([str(worker), "--refresh", "--require-session", "--session-stdin", "--session-output"],
                                   env=environment, input=json.dumps(credentials), text=True, capture_output=True, check=True, timeout=15)

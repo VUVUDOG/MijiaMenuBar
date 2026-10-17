@@ -83,5 +83,20 @@ class AccessoryTests(unittest.TestCase):
         self.assertEqual(set(failures), {"bad", "missing"})
 
 
+    def test_flood_sensors_in_the_home_are_discovered(self):
+        flood = {"type": "urn:miot-spec-v2:device:submersion-sensor:1", "services": [
+            {"iid": 2, "type": "urn:miot-spec-v2:service:submersion-sensor:1", "properties": [
+                {"iid": 1006, "type": "urn:miot-spec-v2:property:submersion-state:1", "format": "bool", "access": ["read"]}]},
+            {"iid": 3, "type": "urn:miot-spec-v2:service:battery:1", "properties": [
+                {"iid": 1003, "type": "urn:miot-spec-v2:property:battery-level:1", "format": "uint8", "access": ["read"]}]}]}
+        cloud = SimpleNamespace(spec=lambda model: flood if model == "flood" else LIGHT,
+                                device_homes={"a": "家", "b": "公司", "c": "家"}, device_rooms={"a": "厨房"})
+        alarms = probe.discover_alarms(cloud, [{"did": "a", "model": "flood"}, {"did": "b", "model": "flood"},
+                                               {"did": "c", "model": "light"}], "家")
+        self.assertEqual([a["device"]["did"] for a in alarms], ["a"])
+        self.assertEqual({p["address"] for p in alarms[0]["props"]},
+                         {"submersion-sensor.submersion-state", "battery.battery-level"})
+
+
 if __name__ == "__main__":
     unittest.main()

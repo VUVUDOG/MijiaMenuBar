@@ -156,7 +156,7 @@ class AuthTests(unittest.TestCase):
 
     def test_memory_session_refreshes_do_not_read_keychain_or_write_tokens_to_disk(self):
         self.store().begin()
-        (self.runtime / "report.json").write_text(json.dumps({"devices": [], "sensors": [], "accessories": []}))
+        (self.runtime / "report.json").write_text(json.dumps({"devices": [], "sensors": [], "accessories": [], "alarms": []}))
         output = io.StringIO()
         with patch.object(probe, "RUNTIME", self.runtime), patch.dict("os.environ", {}, clear=True), \
              patch("auth.keyring.get_password", side_effect=AssertionError("must not read keychain")), \
@@ -185,7 +185,7 @@ class AuthTests(unittest.TestCase):
 
     def test_keychain_denial_is_identified_without_losing_cached_rooms(self):
         self.store().begin()
-        (self.runtime / "report.json").write_text(json.dumps({"devices": [], "sensors": [], "accessories": []}))
+        (self.runtime / "report.json").write_text(json.dumps({"devices": [], "sensors": [], "accessories": [], "alarms": []}))
         with patch.object(probe, "RUNTIME", self.runtime), patch.dict("os.environ", {}, clear=True), \
              patch("auth.keyring.get_password", side_effect=keyring.errors.KeyringLocked("denied")), \
              patch("sys.stderr", io.StringIO()), patch("sys.stdout", io.StringIO()):

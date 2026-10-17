@@ -412,6 +412,38 @@ expect(abs(grid.fittingSize.height - ControlView.gridHeight(gridItems, detail: n
     "Tile grid height: \(ControlView.gridHeight(gridItems, detail: nil)) vs \(grid.fittingSize.height)")
 print("Native accessories: rooms, groups, optimistic queue, merged commands, revert, curtain actions, turn-off batches, refresh preemption and favourites passed")
 
+// Flood alarms: notify once, remind every 30 minutes, report recovery, flag the menu bar.
+let floodRuntime = testRuntime.appendingPathComponent("flood-test")
+try FileManager.default.createDirectory(at: floodRuntime, withIntermediateDirectories: true)
+try seedAuthenticated(runtime: floodRuntime)
+func floodReport(_ wet: Bool) throws {
+    try saveFixture("report.json", ["devices": [["device": ["did": "test-room", "name": "主卧空调"], "room": "主卧",
+        "spec": controlSpec, "state": controlState]], "accessories": [],
+        "alarms": [["device": ["did": "flood", "name": "水浸卫士", "isOnline": true], "room": "厨房", "kind": "submersion-sensor",
+                    "props": [["address": "submersion-sensor.submersion-state", "format": "bool", "readable": true, "writable": false]],
+                    "state": ["submersion-sensor.submersion-state": wet], "read_at": Date().timeIntervalSince1970]]],
+        runtime: floodRuntime)
+}
+try floodReport(false)
+let flood = AppModel(worker: URL(fileURLWithPath: CommandLine.arguments[2]), runtime: floodRuntime,
+    credentialReader: { _ in (errSecSuccess, testSessionData) })
+var notices: [String] = []
+var title = ""
+flood.notifier = { title, _ in notices.append(title) }
+flood.titleChanged = { title = $0 }
+expect(flood.alarms.count == 1 && flood.wetAlarms.isEmpty && notices.isEmpty, "A dry sensor raises nothing")
+try floodReport(true); flood.poll()
+expect(notices == ["检测到漏水"] && title.contains("漏水") && flood.wetAlarms.count == 1, "A wet sensor notifies and flags the menu bar")
+flood.evaluateAlarms()
+expect(notices.count == 1, "No repeated notice within 30 minutes")
+flood.evaluateAlarms(now: Date(timeIntervalSinceNow: 31 * 60))
+expect(notices.count == 2, "Still wet after 30 minutes: remind again")
+try floodReport(false); flood.poll()
+expect(notices.last == "漏水已恢复" && !title.contains("漏水"), "Recovery is reported and the menu bar returns to normal")
+flood.checkAlarms(); finish(flood)
+expect(flood.workerRequests == 1, "Background check runs the small alarm read")
+print("Native flood alarms: notify, remind, recover, menu bar flag and background check passed")
+
 let leaseRuntime = testRuntime.appendingPathComponent("lease-test")
 try FileManager.default.createDirectory(at: leaseRuntime, withIntermediateDirectories: true)
 var lease = ApplicationLease(runtime: leaseRuntime)

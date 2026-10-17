@@ -134,6 +134,35 @@ def accessory_props(spec):
     return props
 
 
+ALARM_ADDRESSES = ("submersion-sensor.submersion-state", "battery.battery-level")
+
+
+def discover_alarms(cloud, devices, home):
+    """Flood (submersion) sensors in the home; they are polled even while the panel is closed."""
+    alarms = []
+    for device in devices:
+        did, model = device.get("did"), device.get("model")
+        if not did or not model or (home and cloud.device_homes.get(did) != home):
+            continue
+        try:
+            spec = cloud.spec(model)
+        except (CloudError, requests.RequestException, ValueError, KeyError):
+            continue
+        if XiaomiCloud.kind((spec or {}).get("type")) != "submersion-sensor":
+            continue
+        props = []
+        for address in ALARM_ADDRESSES:
+            service, prop = XiaomiCloud.find_property(spec, address)
+            if prop and "read" in prop.get("access", []):
+                props.append({"address": address, "siid": service["iid"], "piid": prop["iid"],
+                              "format": prop.get("format"), "readable": True, "writable": False})
+        if any(p["address"] == ALARM_ADDRESSES[0] for p in props):
+            alarms.append({"device": {k: device.get(k) for k in ("did", "name", "model", "isOnline")},
+                           "room": cloud.device_rooms.get(did) or "其他", "kind": "submersion-sensor",
+                           "props": props, "state": {}})
+    return alarms
+
+
 def choose_home(cloud, summaries):
     """The home that holds the air conditioners, otherwise the one with the most devices."""
     homes = [cloud.device_homes.get(d["did"]) for d in summaries]
@@ -216,6 +245,7 @@ def main(argv=None):
     parser.add_argument("--field", action="append",
                         help="控制属性（空调字段或配件地址如 light.on），可重复；与 --value 按顺序配对")
     parser.add_argument("--scope", help="刷新时只读取该房间的配件")
+    parser.add_argument("--alarms", action="store_true", help="只读取水浸传感器（后台定时检查）")
     parser.add_argument("--batch", help="JSON：{设备标识: {属性: 值}}，多个设备并行控制")
     parser.add_argument("--value", action="append", help="JSON 控制值，可重复")
     parser.add_argument("--import-session", action="store_true", help=argparse.SUPPRESS)
@@ -268,11 +298,11 @@ def main(argv=None):
             # The native app captures this pipe privately. No credentials go in
             # argv, environment, logs, status.json or other runtime files.
             print(json.dumps({"generation": store.generation, "session": cloud.credentials}), flush=True)
-        if args.batch or args.room or args.field or args.value or args.refresh:
+        if args.batch or args.room or args.field or args.value or args.refresh or args.alarms:
             if not (RUNTIME / "report.json").exists():
                 raise CloudError("请先同步空调设备")
             report = json.loads((RUNTIME / "report.json").read_text())
-            if "sensors" not in report or "accessories" not in report:
+            if "sensors" not in report or "accessories" not in report or "alarms" not in report:
                 # Reports from older versions: discover rooms, sensors and accessories once.
                 # A failed lookup must not block the air-conditioner refresh; retry next time.
                 try:
@@ -282,7 +312,8 @@ def main(argv=None):
                     report["sensors"] = discover_sensors(cloud, devices)
                     report["home"] = choose_home(cloud, [d["device"] for d in report["devices"]])
                     report["accessories"] = discover_accessories(cloud, devices, report["home"])
-                    read_accessories(cloud, report["accessories"])
+                    report["alarms"] = discover_alarms(cloud, devices, report["home"])
+                    read_accessories(cloud, report["accessories"] + report["alarms"])
                 except (CloudError, requests.RequestException, ValueError, KeyError):
                     pass
             targets = report["devices"]
@@ -313,11 +344,18 @@ def main(argv=None):
                     return 1
                 status("complete", "指令已执行，云端回读已确认")
                 return 0
+            if args.alarms:
+                # Background check while the panel is closed: one small read, no status message changes.
+                read_accessories(cloud, report.get("alarms", []))
+                report["alarms_read_at"] = time.time()
+                write_json("report.json", report)
+                return 0
             status("reading", "正在刷新空调状态…")
             # Air conditioners, thermometers and the room's accessories are read in parallel.
             # Accessories are many: refresh only the room being looked at.
             from concurrent.futures import ThreadPoolExecutor
             scoped = [a for a in report.get("accessories", []) if not args.scope or a["room"] == args.scope]
+            scoped += report.get("alarms", [])
 
             def read_ac(item):
                 if item.get("spec"):
@@ -358,9 +396,10 @@ def main(argv=None):
             reports.append(report)
         home = choose_home(cloud, summaries)
         accessories = discover_accessories(cloud, devices, home)
-        read_accessories(cloud, accessories)
+        alarms = discover_alarms(cloud, devices, home)
+        read_accessories(cloud, accessories + alarms)
         full = {"devices": reports, "sensors": discover_sensors(cloud, devices), "home": home,
-                "accessories": accessories, "total_device_count": len(devices), "read_at": time.time()}
+                "accessories": accessories, "alarms": alarms, "total_device_count": len(devices), "read_at": time.time()}
         read_climate(cloud, full)
         write_json("report.json", full)
         if not summaries:

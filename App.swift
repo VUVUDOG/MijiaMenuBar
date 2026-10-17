@@ -4,6 +4,7 @@ import Darwin
 import Security
 import CryptoKit
 import ServiceManagement
+import UserNotifications
 
 // Hold this lease for the application's lifetime. Opening a second copy must
 // not create another independent Keychain authorization or refresh loop.
@@ -94,6 +95,10 @@ final class AppModel: ObservableObject {
     var failedIDs: Set<String>?
     var cancelledRefresh: Process?
     @Published var favorites: [String] = UserDefaults.standard.stringArray(forKey: "favorites") ?? []
+    // Flood sensors: polled in the background, notify on change and every 30 minutes while wet.
+    @Published var alarms: [Accessory] = []
+    var alarmNotices: [String: Date] = [:]
+    var notifier: (String, String) -> Void = AppModel.postNotification
     var flushWork: DispatchWorkItem?
     @Published var authState = "legacy"
     let runtime: URL
@@ -225,7 +230,7 @@ final class AppModel: ObservableObject {
         let authenticated = authState == "legacy" || authState == "authenticated"
         if !authenticated || sessionGeneration != generation { forgetSession() }
         if !authenticated {
-            rooms = []; accessories = []; readAt = nil; selectedID = ""
+            rooms = []; accessories = []; alarms = []; readAt = nil; selectedID = ""
             if !active && phase != "error" { qr = nil; phase = "logged_out"; message = authState == "pending" ? "上次扫码未完成，请重新登录" : "请扫码登录米家" }
         }
         if let data = try? Data(contentsOf: runtime.appendingPathComponent("status.json")), forceStatus || data != lastStatus,
@@ -285,6 +290,8 @@ final class AppModel: ObservableObject {
                     room: item["room"] as? String)
             }
             accessories = (report["accessories"] as? [[String: Any]] ?? []).compactMap(Self.accessory)
+            alarms = (report["alarms"] as? [[String: Any]] ?? []).compactMap(Self.accessory)
+            evaluateAlarms()
             if !rooms.contains(where: { $0.id == selectedID }) { selectedID = rooms.first?.id ?? "" }
         }
         if let room = rooms.first(where: { $0.area == area }), room.id != selectedID { selectedID = room.id }
@@ -328,6 +335,7 @@ final class AppModel: ObservableObject {
     }
 
     func updateTitle() {
+        if !wetAlarms.isEmpty { titleChanged?(" ⚠︎ 漏水"); return }
         if let room = selected, let temp = room.target {
             titleChanged?(room.power == true ? " \(Int(temp))°" : " 米家")
         } else { titleChanged?(" 米家") }
@@ -535,7 +543,7 @@ final class AppModel: ObservableObject {
         guard !controlling else { return false }
         let previousProcess = process
         flushWork?.cancel(); flushWork = nil
-        pending = [:]; inFlight = nil; accessories = []
+        pending = [:]; inFlight = nil; accessories = []; alarms = []; alarmNotices = [:]
         authorizationID = nil
         process = nil
         active = false
@@ -641,7 +649,7 @@ final class AppModel: ObservableObject {
     // A running refresh only reads; stop it so a tap does not wait up to a second behind it.
     func cancelRefresh() {
         guard let task = process, task.isRunning, cancelledRefresh == nil,
-              let arguments = task.arguments, arguments.contains("--refresh"),
+              let arguments = task.arguments, arguments.contains("--refresh") || arguments.contains("--alarms"),
               !arguments.contains("--field"), !arguments.contains("--batch") else { return }
         cancelledRefresh = task
         task.terminate()
@@ -736,6 +744,49 @@ final class AppModel: ObservableObject {
         for (id, changes) in targets { pending[id, default: [:]].merge(changes) { $1 } }
         if !targets.isEmpty { updateTitle(); scheduleFlush(after: 0.05) }
         return targets.count
+    }
+
+    // MARK: Flood alarms
+
+    static let wetAddress = "submersion-sensor.submersion-state"
+    var wetAlarms: [Accessory] { alarms.filter { $0.values[Self.wetAddress]?.base as? Bool == true } }
+
+    func evaluateAlarms(now: Date = Date()) {
+        for sensor in alarms {
+            guard let wet = sensor.values[Self.wetAddress]?.base as? Bool else { continue }
+            let place = "\(sensor.room) · \(sensor.name)"
+            if wet {
+                if let last = alarmNotices[sensor.id], now.timeIntervalSince(last) < 30 * 60 { continue }
+                notifier("检测到漏水", "\(place) 检测到漏水，请尽快查看。")
+                alarmNotices[sensor.id] = now
+            } else if alarmNotices.removeValue(forKey: sensor.id) != nil {
+                notifier("漏水已恢复", "\(place) 已恢复正常。")
+            }
+        }
+        updateTitle()
+    }
+
+    // A tiny background read; the normal refresh already includes the sensors.
+    func checkAlarms() {
+        guard !alarms.isEmpty, !busy, !automaticRefreshSuspended, pending.isEmpty, inFlight == nil else { return }
+        run(arguments: ["--alarms"], label: message)
+    }
+
+    // Only a real app bundle may use the notification centre (tests run as a bare executable).
+    static var canNotify: Bool { Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app" }
+
+    static func requestNotifications() {
+        guard canNotify else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    static func postNotification(_ title: String, _ body: String) {
+        guard canNotify else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     // MARK: Favourites
@@ -1282,7 +1333,7 @@ struct ControlView: View {
 
     var middleCap: CGFloat {
         let screen = NSScreen.main?.visibleFrame.height ?? 900
-        let top: CGFloat = 10 + 38 + Self.sectionSpacing + (favoritesHeight > 0 ? favoritesHeight + Self.sectionSpacing : 0)
+        let top: CGFloat = 10 + 38 + Self.sectionSpacing + floodHeight + (favoritesHeight > 0 ? favoritesHeight + Self.sectionSpacing : 0)
             + 30 + Self.sectionSpacing
         let bottom: CGFloat = Self.sectionSpacing + 1 + Self.sectionSpacing + 36 + 10
             + (updater.latest != nil || updater.note != nil ? 46 : 0)
@@ -1348,6 +1399,24 @@ struct ControlView: View {
         }.frame(maxWidth: .infinity).padding(.vertical, 22).modifier(Surface(radius: 18))
     }
 
+    var floodBanner: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(model.wetAlarms) { sensor in
+                HStack(spacing: 7) {
+                    Image(systemName: "drop.triangle.fill").font(.system(size: 12))
+                    Text("\(sensor.room) · \(sensor.name) 检测到漏水").font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                    Spacer(minLength: 0)
+                }.frame(height: 16)
+            }
+        }.foregroundStyle(Color(red: 1, green: 0.55, blue: 0.5)).padding(.horizontal, 12).padding(.vertical, 9)
+            .background(Color.red.opacity(0.16), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.red.opacity(0.35)))
+    }
+    var floodHeight: CGFloat {
+        let count = CGFloat(model.wetAlarms.count)
+        return count == 0 ? 0 : count * 16 + (count - 1) * 3 + 18 + Self.sectionSpacing
+    }
+
     var updateBanner: some View {
         HStack(spacing: 9) {
             if updater.state != "idle" { ProgressView().controlSize(.mini).frame(width: 12) }
@@ -1384,6 +1453,7 @@ struct ControlView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: Self.sectionSpacing) {
             header
+            if !model.wetAlarms.isEmpty { floodBanner }
             if model.hasDevices {
                 if !model.favoriteAccessories.isEmpty { favoritesSection }
                 roomTabs
@@ -1620,6 +1690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var panel: MenuPanel!
     var model: AppModel!
     var refreshTimer: Timer?
+    var alarmTimer: Timer?
     var clickMonitor: Any?
     var keyMonitor: Any?
 
@@ -1692,6 +1763,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         if !CommandLine.arguments.contains(where: { $0.hasPrefix("--preview=") }) { Updater.shared.start() }
+        AppModel.requestNotifications()
+        alarmTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self = self, !self.panel.isVisible else { return }
+            self.model.checkAlarms()
+        }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             guard let self = self, self.panel.isVisible, !self.model.busy, self.model.hasDevices else { return }
             self.model.refresh(automatic: true)
