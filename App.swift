@@ -98,6 +98,9 @@ final class AppModel: ObservableObject {
     // Flood sensors: polled in the background, notify on change and every 30 minutes while wet.
     @Published var alarms: [Accessory] = []
     var alarmNotices: [String: Date] = [:]
+    // Sleep timers (device id -> time to switch off), kept by this app across restarts.
+    @Published var timers: [String: Date] = (UserDefaults.standard.dictionary(forKey: "timers") as? [String: Double] ?? [:])
+        .mapValues { Date(timeIntervalSince1970: $0) }
     var notifier: (String, String) -> Void = AppModel.postNotification
     var flushWork: DispatchWorkItem?
     @Published var authState = "legacy"
@@ -296,6 +299,7 @@ final class AppModel: ObservableObject {
         }
         if let room = rooms.first(where: { $0.area == area }), room.id != selectedID { selectedID = room.id }
         UserDefaults.standard.set(selectedID, forKey: "selectedRoom")
+        checkTimers()
         if active && phase == "authenticating", let startedAt = startedAt, Date().timeIntervalSince(startedAt) > 12 {
             message = "请允许系统钥匙串访问，或从设置重新扫码登录"
         }
@@ -714,9 +718,10 @@ final class AppModel: ObservableObject {
     // MARK: Turn everything off
 
     // Lights, fans, purifiers, bath heaters and air conditioners; never outlets or curtains.
-    func offChanges(_ item: Accessory) -> [String: AnyHashable] {
+    func offChanges(_ item: Accessory, includeOutlet: Bool = false) -> [String: AnyHashable] {
         guard item.online else { return [:] }
         var changes: [String: AnyHashable] = [:]
+        if includeOutlet, item.kind == "outlet", item.values["switch.on"]?.base as? Bool == true { return ["switch.on": false] }
         for address in ["light.on", "fan.on", "air-purifier.on"] where item.prop(address)?.writable == true {
             if item.values[address]?.base as? Bool == true { changes[address] = false }
         }
@@ -787,6 +792,54 @@ final class AppModel: ObservableObject {
         content.body = body
         content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    // MARK: Sleep timers
+
+    static func timerEligible(_ item: Accessory) -> Bool {
+        item.kind != "curtain" && ["light.on", "fan.on", "air-purifier.on", "switch.on", "ptc-bath-heater.mode"]
+            .contains { item.prop($0)?.writable == true }
+    }
+
+    func setTimer(_ id: String, hours: Double, now: Date = Date()) {
+        timers[id] = now.addingTimeInterval(hours * 3600)
+        saveTimers()
+    }
+    func cancelTimer(_ id: String) {
+        timers[id] = nil
+        saveTimers()
+    }
+    func saveTimers() {
+        UserDefaults.standard.set(timers.mapValues(\.timeIntervalSince1970), forKey: "timers")
+    }
+
+    // Runs every second from poll(). A timer missed by more than two hours (Mac asleep or the
+    // app closed) is dropped instead of switching things off long after it was meant to.
+    func checkTimers(now: Date = Date()) {
+        guard hasDevices else { return }
+        var fired: [String] = []
+        for (id, due) in timers where due <= now {
+            timers[id] = nil
+            guard now.timeIntervalSince(due) < 2 * 3600 else { continue }
+            var changes: [String: AnyHashable] = [:]
+            if let room = rooms.first(where: { $0.id == id }), overlaid(room).power == true { changes = ["on": false] }
+            if let item = accessories.first(where: { $0.id == id }) { changes = offChanges(overlaid(item), includeOutlet: true) }
+            guard !changes.isEmpty else { continue }
+            pending[id, default: [:]].merge(changes) { $1 }
+            fired.append(displayName(id) ?? "设备")
+        }
+        guard !fired.isEmpty || timers.count != (UserDefaults.standard.dictionary(forKey: "timers")?.count ?? 0) else { return }
+        saveTimers()
+        if !fired.isEmpty {
+            notifier("定时关闭", "已关闭 " + fired.joined(separator: "、"))
+            updateTitle()
+            scheduleFlush(after: 0.05)
+        }
+    }
+
+    static func remaining(_ due: Date, now: Date = Date()) -> String {
+        let minutes = Int(ceil(due.timeIntervalSince(now) / 60))
+        return minutes <= 1 ? "即将关闭" : String(format: "%d:%02d 后关闭", minutes / 60, minutes % 60)
     }
 
     // MARK: Favourites
@@ -1125,7 +1178,13 @@ struct ControlView: View {
     static func climateHeight(_ room: RoomReading, expanded: Bool) -> CGFloat {
         var height: CGFloat = 32 + 20
         if room.indoor != nil { height += 6 + 14 }
-        if expanded { height += 10 + (room.modes.isEmpty ? 0 : 44) + (room.fans.isEmpty ? 0 : 8 + 28) }
+        if expanded {
+            var parts: [CGFloat] = []
+            if !room.modes.isEmpty { parts.append(44) }
+            if !room.fans.isEmpty { parts.append(28) }
+            if room.writable.contains("on") { parts.append(TimerRow.height) }
+            height += 4 + 6 + parts.reduce(0, +) + CGFloat(max(parts.count - 1, 0)) * 8
+        }
         return height
     }
 
@@ -1202,7 +1261,10 @@ struct ControlView: View {
                             Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.4)).rotationEffect(.degrees(climateExpanded ? 180 : 0))
                         }
-                        Text(climateSummary(room)).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                        TimelineView(.periodic(from: .now, by: 20)) { context in
+                            let timer = model.timers[room.id].map { "⏱ " + AppModel.remaining($0, now: context.date) + " · " } ?? ""
+                            Text(timer + climateSummary(room)).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                        }
                     }
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle()).onTapGesture { climateExpanded.toggle() }
@@ -1259,6 +1321,7 @@ struct ControlView: View {
                             }
                         }
                     }
+                    if room.writable.contains("on") { TimerRow(model: model, id: room.id) }
                 }.padding(.top, 4)
             }
         }.padding(.horizontal, 10).padding(.vertical, 10).modifier(Surface(radius: 12))
@@ -1268,7 +1331,7 @@ struct ControlView: View {
 
     func tile(_ item: Accessory, favorites: Bool) -> some View {
         let on = item.isOn == true
-        let hasControls = item.online && !AccessoryDetail.controls(item).isEmpty
+        let hasControls = item.online && (!AccessoryDetail.controls(item).isEmpty || AppModel.timerEligible(item))
         let key = (favorites ? "fav-" : "") + item.id
         return HStack(spacing: 7) {
             HStack(spacing: 7) {
@@ -1282,8 +1345,11 @@ struct ControlView: View {
                             Image(systemName: "star.fill").font(.system(size: 7)).foregroundStyle(Self.accent.opacity(0.8))
                         }
                     }
-                    Text(favorites && item.online ? "\(item.room) · \(AccessoryDetail.summary(item))" : AccessoryDetail.summary(item))
-                        .font(.system(size: 9.5)).foregroundStyle(.secondary).lineLimit(1)
+                    TimelineView(.periodic(from: .now, by: 20)) { context in
+                        let timer = model.timers[item.id].map { "⏱ " + AppModel.remaining($0, now: context.date) + " · " } ?? ""
+                        Text(timer + (favorites && item.online ? "\(item.room) · \(AccessoryDetail.summary(item))" : AccessoryDetail.summary(item)))
+                            .font(.system(size: 9.5)).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 0)
             }.contentShape(Rectangle()).onTapGesture { if item.online { model.quickToggle(item) } }
@@ -1475,6 +1541,39 @@ func symbol(_ name: String, fallback: String) -> String {
     NSImage(systemSymbolName: name, accessibilityDescription: nil) == nil ? fallback : name
 }
 
+// "Switch off in 1 / 2 / 4 hours", or the countdown with a cancel button.
+struct TimerRow: View {
+    @ObservedObject var model: AppModel
+    let id: String
+    static let height: CGFloat = 26
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "timer").font(.system(size: 10)).foregroundStyle(.secondary)
+            if let due = model.timers[id] {
+                TimelineView(.periodic(from: .now, by: 20)) { context in
+                    Text(AppModel.remaining(due, now: context.date)).font(.system(size: 11)).monospacedDigit()
+                        .foregroundStyle(ControlView.accent)
+                }
+                Spacer()
+                Button { model.cancelTimer(id) } label: {
+                    Text("取消定时").font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                        .padding(.horizontal, 10).frame(height: 22).modifier(Surface(radius: 8))
+                }.buttonStyle(.plain)
+            } else {
+                Text("定时关闭").font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                ForEach([1.0, 2.0, 4.0], id: \.self) { hours in
+                    Button { model.setTimer(id, hours: hours) } label: {
+                        Text("\(Int(hours)) 小时").font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                            .padding(.horizontal, 8).frame(height: 22).modifier(Surface(radius: 8))
+                    }.buttonStyle(.plain)
+                }
+            }
+        }.frame(height: Self.height)
+    }
+}
+
 // Controls shown under a tile, plus text helpers shared by tiles and favourites.
 struct AccessoryDetail: View {
     let item: Accessory
@@ -1493,7 +1592,9 @@ struct AccessoryDetail: View {
     }
     static func height(_ item: Accessory) -> CGFloat {
         let parts = controls(item)
-        return 20 + parts.reduce(0) { $0 + controlHeight($1) } + CGFloat(max(parts.count - 1, 0)) * 8
+        var heights = parts.map(controlHeight)
+        if AppModel.timerEligible(item) { heights.append(TimerRow.height) }
+        return 20 + heights.reduce(0, +) + CGFloat(max(heights.count - 1, 0)) * 8
     }
 
     static func icon(_ item: Accessory) -> String {
@@ -1560,6 +1661,7 @@ struct AccessoryDetail: View {
     var body: some View {
         VStack(spacing: 8) {
             ForEach(Self.controls(item), id: \.address) { prop in control(prop).frame(height: Self.controlHeight(prop)) }
+            if AppModel.timerEligible(item) { TimerRow(model: model, id: item.id) }
         }.padding(.horizontal, 10).padding(.vertical, 10)
             .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(ControlView.accent.opacity(0.25)))

@@ -444,6 +444,50 @@ flood.checkAlarms(); finish(flood)
 expect(flood.workerRequests == 1, "Background check runs the small alarm read")
 print("Native flood alarms: notify, remind, recover, menu bar flag and background check passed")
 
+// Sleep timers: fire once, persist, drop stale ones, include outlets, never curtains.
+UserDefaults.standard.removeObject(forKey: "timers")
+let timerRuntime = testRuntime.appendingPathComponent("timer-test")
+try FileManager.default.createDirectory(at: timerRuntime, withIntermediateDirectories: true)
+try seedAuthenticated(runtime: timerRuntime)
+let outletProps: [[String: Any]] = [["address": "switch.on", "format": "bool", "readable": true, "writable": true]]
+try saveFixture("report.json", ["devices": [["device": ["did": "test-room", "name": "主卧空调"], "room": "主卧",
+    "spec": controlSpec, "state": controlState]], "accessories": [
+        ["device": ["did": "plug", "name": "插座", "isOnline": true], "room": "主卧", "kind": "outlet", "group": false,
+         "props": outletProps, "state": ["switch.on": true]],
+        ["device": ["did": "lamp", "name": "吸顶灯", "isOnline": true], "room": "主卧", "kind": "light", "group": false,
+         "props": lightProps, "state": ["light.on": false]],
+        ["device": ["did": "c1", "name": "窗帘", "isOnline": true], "room": "主卧", "kind": "curtain", "group": false,
+         "props": curtainProps, "state": [:]]]], runtime: timerRuntime)
+let timed = AppModel(worker: URL(fileURLWithPath: CommandLine.arguments[2]), runtime: timerRuntime,
+    credentialReader: { _ in (errSecSuccess, testSessionData) })
+var timerNotices: [String] = []
+timed.notifier = { _, body in timerNotices.append(body) }
+let curtainItem = timed.accessories.first { $0.id == "c1" }!, plugItem = timed.accessories.first { $0.id == "plug" }!
+expect(!AppModel.timerEligible(curtainItem) && AppModel.timerEligible(plugItem), "Curtains cannot be timed; outlets can")
+let start = Date()
+timed.setTimer("test-room", hours: 1, now: start)
+timed.setTimer("plug", hours: 2, now: start)
+timed.setTimer("lamp", hours: 1, now: start)
+expect((UserDefaults.standard.dictionary(forKey: "timers") as? [String: Double])?.count == 3, "Timers persist across restarts")
+expect(AppModel.remaining(start.addingTimeInterval(3600 + 1), now: start) == "1:01 后关闭", "Countdown text")
+timed.checkTimers(now: start.addingTimeInterval(1800))
+expect(timed.pending.isEmpty && timed.timers.count == 3, "Nothing fires early")
+timed.checkTimers(now: start.addingTimeInterval(3601))
+expect(timed.pending["test-room"] == ["on": AnyHashable(false)] && timed.pending["lamp"] == nil && timed.timers.keys.sorted() == ["plug"],
+    "Due timers switch running devices off; devices already off are left alone")
+expect(timerNotices.last == "已关闭 主卧空调", "A fired timer is reported")
+settleQueue(timed)
+timed.checkTimers(now: start.addingTimeInterval(2 * 3600 + 3 * 3600))
+expect(timed.pending.isEmpty && timed.timers.isEmpty, "A timer missed by more than two hours is dropped")
+timed.setTimer("plug", hours: 1, now: start)
+timed.checkTimers(now: start.addingTimeInterval(3601))
+expect(timed.pending["plug"] == ["switch.on": AnyHashable(false)], "Timed outlets switch off")
+settleQueue(timed)
+timed.setTimer("lamp", hours: 4); timed.cancelTimer("lamp")
+expect(timed.timers.isEmpty, "Timers can be cancelled")
+UserDefaults.standard.removeObject(forKey: "timers")
+print("Native sleep timers: eligibility, persistence, firing, stale drop, outlets and cancel passed")
+
 let leaseRuntime = testRuntime.appendingPathComponent("lease-test")
 try FileManager.default.createDirectory(at: leaseRuntime, withIntermediateDirectories: true)
 var lease = ApplicationLease(runtime: leaseRuntime)
