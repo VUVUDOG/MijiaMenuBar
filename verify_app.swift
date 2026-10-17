@@ -500,6 +500,28 @@ expect(timed.timers.isEmpty, "Timers can be cancelled")
 UserDefaults.standard.removeObject(forKey: "timers")
 print("Native sleep timers: eligibility, persistence, firing, stale drop, outlets and cancel passed")
 
+// Appearance: follow macOS by default; light / dark persist and apply app-wide.
+UserDefaults.standard.removeObject(forKey: "appearance")
+let preferences = Preferences()
+expect(preferences.appearance == "system" && Preferences.nsAppearance("system") == nil, "Default follows the system")
+preferences.appearance = "light"
+expect(NSApp.appearance?.name == .aqua && UserDefaults.standard.string(forKey: "appearance") == "light", "Light applies and persists")
+preferences.appearance = "dark"
+expect(NSApp.appearance?.name == .darkAqua, "Dark applies")
+preferences.appearance = "system"
+expect(NSApp.appearance == nil, "Back to following the system")
+UserDefaults.standard.set("purple", forKey: "appearance")
+expect(Preferences().appearance == "system", "Unknown saved values fall back to the system")
+UserDefaults.standard.removeObject(forKey: "appearance")
+func resolved(_ color: Color, _ name: NSAppearance.Name) -> NSColor {
+    var result = NSColor.clear
+    NSAppearance(named: name)!.performAsCurrentDrawingAppearance { result = NSColor(color).usingColorSpace(.sRGB)! }
+    return result
+}
+expect(resolved(ControlView.accent, .aqua).greenComponent < 0.6 && resolved(ControlView.accent, .darkAqua).greenComponent > 0.8,
+    "The accent darkens in light mode for contrast")
+print("Native appearance: system default, light, dark, persistence and adaptive colours passed")
+
 let leaseRuntime = testRuntime.appendingPathComponent("lease-test")
 try FileManager.default.createDirectory(at: leaseRuntime, withIntermediateDirectories: true)
 var lease = ApplicationLease(runtime: leaseRuntime)

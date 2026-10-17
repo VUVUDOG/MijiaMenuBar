@@ -1067,19 +1067,48 @@ final class Updater: ObservableObject {
     }
 }
 
+extension Color {
+    static func adaptive(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        })
+    }
+}
+
+// Light / dark / follow macOS. Applied app-wide so the panel, glass and menus all match.
+final class Preferences: ObservableObject {
+    static let shared = Preferences()
+    static let choices: [(id: String, label: String)] = [("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
+    @Published var appearance: String {
+        didSet { UserDefaults.standard.set(appearance, forKey: "appearance"); apply() }
+    }
+    init() {
+        let saved = UserDefaults.standard.string(forKey: "appearance") ?? "system"
+        appearance = Self.choices.contains { $0.id == saved } ? saved : "system"
+    }
+    static func nsAppearance(_ id: String) -> NSAppearance? {
+        switch id {
+        case "light": return NSAppearance(named: .aqua)
+        case "dark": return NSAppearance(named: .darkAqua)
+        default: return nil   // follow the system, including automatic day / night switching
+        }
+    }
+    func apply() { NSApp?.appearance = Self.nsAppearance(appearance) }
+}
+
 struct Surface: ViewModifier {
     var selected = false
     var radius: CGFloat = 12
     func body(content: Content) -> some View {
-        content.background(selected ? ControlView.accent.opacity(0.12) : Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: radius))
-            .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(selected ? ControlView.accent.opacity(0.32) : Color.white.opacity(0.065), lineWidth: 1))
+        content.background(selected ? ControlView.accent.opacity(0.12) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: radius))
+            .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(selected ? ControlView.accent.opacity(0.32) : Color.primary.opacity(0.065), lineWidth: 1))
     }
 }
 
 struct QuietIconStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label.foregroundStyle(.white.opacity(0.8))
-            .background(Color.white.opacity(configuration.isPressed ? 0.12 : 0.045), in: Circle())
+        configuration.label.foregroundStyle(Color.primary.opacity(0.8))
+            .background(Color.primary.opacity(configuration.isPressed ? 0.12 : 0.045), in: Circle())
             .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }
@@ -1087,10 +1116,16 @@ struct QuietIconStyle: ButtonStyle {
 struct ControlView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var updater = Updater.shared
+    @ObservedObject var preferences = Preferences.shared
     @State private var detailID: String?
     @State private var climateExpanded = false
     @State private var confirmOffAll = false
-    static let accent = Color(red: 0.45, green: 0.84, blue: 0.77)
+    static let accent = Color.adaptive(light: NSColor(red: 0.04, green: 0.53, blue: 0.46, alpha: 1),
+                                       dark: NSColor(red: 0.45, green: 0.84, blue: 0.77, alpha: 1))
+    // Text on an accent-filled button.
+    static let onAccent = Color.adaptive(light: .white, dark: NSColor(red: 0.07, green: 0.16, blue: 0.14, alpha: 1))
+    static let alarm = Color.adaptive(light: NSColor(red: 0.78, green: 0.13, blue: 0.1, alpha: 1),
+                                      dark: NSColor(red: 1, green: 0.55, blue: 0.5, alpha: 1))
 
     func roomIcon(_ name: String) -> String {
         if name.contains("卧") { return "bed.double" }
@@ -1112,7 +1147,8 @@ struct ControlView: View {
                 .background(Self.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 4) {
                 Text("米家").font(.system(size: 16, weight: .semibold))
-                Text(!model.hasDevices ? "让舒适触手可及" : "\(model.areas.count) 个房间 · 空调 \(model.displayRooms.filter { $0.power == true }.count) 台运行 · \(model.accessories.map(model.overlaid).filter { $0.kind != "curtain" && $0.isOn == true }.count) 个设备开着")
+                Text(!model.hasDevices ? "让舒适触手可及" : "\(model.areas.count) 个房间 · 空调 \(model.displayRooms.filter { $0.power == true }.count) 台 · \(model.accessories.map(model.overlaid).filter { $0.kind != "curtain" && $0.isOn == true }.count) 个设备开着")
+                    .lineLimit(1).minimumScaleFactor(0.85)
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer()
@@ -1130,9 +1166,9 @@ struct ControlView: View {
                     HStack(spacing: 5) {
                         Image(systemName: "power").font(.system(size: 12, weight: .semibold))
                         if confirmOffAll { Text("确认全关 \(count) 个").font(.system(size: 11, weight: .semibold)) }
-                    }.foregroundStyle(confirmOffAll ? Color.orange : .white.opacity(count > 0 ? 0.65 : 0.25))
+                    }.foregroundStyle(confirmOffAll ? Color.orange : Color.primary.opacity(count > 0 ? 0.65 : 0.25))
                         .frame(minWidth: 34, minHeight: 34).padding(.horizontal, confirmOffAll ? 10 : 0)
-                        .background((confirmOffAll ? Color.orange.opacity(0.14) : Color.white.opacity(0.045)), in: Capsule())
+                        .background((confirmOffAll ? Color.orange.opacity(0.14) : Color.primary.opacity(0.045)), in: Capsule())
                 }.buttonStyle(.plain).disabled(count == 0)
                     .help(count > 0 ? "全屋全关：灯、风扇、净化器、浴霸和空调（不含插座、窗帘）" : "没有开着的设备")
                     .accessibilityLabel("全屋全关")
@@ -1143,6 +1179,9 @@ struct ControlView: View {
                 Divider()
                 Button("退出登录") { model.logout() }.disabled(model.controlling || !model.canLogout)
                 Divider()
+                Picker("外观", selection: Binding(get: { preferences.appearance }, set: { preferences.appearance = $0 })) {
+                    ForEach(Preferences.choices, id: \.id) { choice in Text(choice.label).tag(choice.id) }
+                }
                 Toggle("开机自动启动", isOn: Binding(get: { updater.launchAtLogin }, set: { updater.setLaunchAtLogin($0) }))
                 Button(updater.latest.map { "更新到 \($0)" } ?? "检查更新") {
                     if updater.latest != nil { updater.install() } else { updater.check(manual: true) }
@@ -1156,8 +1195,8 @@ struct ControlView: View {
                 Button("退出应用") { NSApplication.shared.terminate(nil) }
             } label: {
                 Image(systemName: "gearshape.fill").font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.65)).frame(width: 34, height: 34)
-                    .background(Color.white.opacity(0.045), in: Circle())
+                    .foregroundStyle(Color.primary.opacity(0.65)).frame(width: 34, height: 34)
+                    .background(Color.primary.opacity(0.045), in: Circle())
             }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("设置")
         }
     }
@@ -1224,7 +1263,7 @@ struct ControlView: View {
                 let selected = model.area == name
                 Button { model.selectArea(name) } label: {
                     Text(name).font(.system(size: 11.5, weight: selected ? .semibold : .medium)).lineLimit(1).minimumScaleFactor(0.75)
-                        .foregroundStyle(selected ? Self.accent : .white.opacity(0.72))
+                        .foregroundStyle(selected ? Self.accent : Color.primary.opacity(0.72))
                         .frame(maxWidth: .infinity).frame(height: Self.roomChipHeight)
                         .modifier(Surface(selected: selected, radius: 9))
                         .overlay(alignment: .topTrailing) {
@@ -1263,13 +1302,13 @@ struct ControlView: View {
             HStack(spacing: 8) {
                 HStack(spacing: 8) {
                     Image(systemName: on ? modeIcon(modeLabel) : "air.conditioner.horizontal").font(.system(size: 13))
-                        .foregroundStyle(on ? Self.accent : .white.opacity(0.55)).frame(width: 28, height: 28)
-                        .background(on ? Self.accent.opacity(0.14) : Color.white.opacity(0.05), in: Circle())
+                        .foregroundStyle(on ? Self.accent : Color.primary.opacity(0.55)).frame(width: 28, height: 28)
+                        .background(on ? Self.accent.opacity(0.14) : Color.primary.opacity(0.05), in: Circle())
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 4) {
                             Text(room.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                             Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.4)).rotationEffect(.degrees(climateExpanded ? 180 : 0))
+                                .foregroundStyle(Color.primary.opacity(0.4)).rotationEffect(.degrees(climateExpanded ? 180 : 0))
                         }
                         TimelineView(.periodic(from: .now, by: 20)) { context in
                             let timer = model.timers[room.id].map { "⏱ " + AppModel.remaining($0, now: context.date) + " · " } ?? ""
@@ -1291,8 +1330,8 @@ struct ControlView: View {
                     .disabled(!writable || (room.target ?? room.maximum) >= room.maximum)
                 Button { model.set("on", value: !(room.power ?? false)) } label: {
                     Image(systemName: "power").font(.system(size: 12, weight: .semibold)).frame(width: 30, height: 30)
-                        .foregroundStyle(on ? Self.accent : .white.opacity(0.6))
-                        .background(on ? Self.accent.opacity(0.16) : Color.white.opacity(0.055), in: Circle())
+                        .foregroundStyle(on ? Self.accent : Color.primary.opacity(0.6))
+                        .background(on ? Self.accent.opacity(0.16) : Color.primary.opacity(0.055), in: Circle())
                 }.buttonStyle(.plain).disabled(!room.writable.contains("on"))
                     .help(on ? "关闭空调" : "开启空调").accessibilityLabel(on ? "关闭空调" : "开启空调")
             }.frame(height: 32)
@@ -1301,7 +1340,7 @@ struct ControlView: View {
                     Image(systemName: "thermometer.medium").font(.system(size: 9))
                     Text("室温 " + String(format: "%.1f°", indoor) + (room.humidity.map { " · 湿度 \(Int($0.rounded()))%" } ?? ""))
                         .font(.system(size: 10)).monospacedDigit()
-                }.foregroundStyle(.white.opacity(0.6)).frame(height: 14).padding(.leading, 36)
+                }.foregroundStyle(Color.primary.opacity(0.6)).frame(height: 14).padding(.leading, 36)
             }
             if climateExpanded {
                 VStack(spacing: 8) {
@@ -1313,7 +1352,7 @@ struct ControlView: View {
                                     VStack(spacing: 3) {
                                         Image(systemName: modeIcon(option.label)).font(.system(size: 12))
                                         Text(option.label).font(.system(size: 10, weight: .medium))
-                                    }.foregroundStyle(selected ? Self.accent : .white.opacity(0.6))
+                                    }.foregroundStyle(selected ? Self.accent : Color.primary.opacity(0.6))
                                         .frame(maxWidth: .infinity).frame(height: 44).modifier(Surface(selected: selected, radius: 9))
                                 }.buttonStyle(.plain).disabled(!room.writable.contains("mode"))
                             }
@@ -1325,7 +1364,7 @@ struct ControlView: View {
                                 let selected = room.fan == option.id
                                 Button { model.set("fan-level", value: option.id) } label: {
                                     Text(option.label).font(.system(size: 10, weight: .medium))
-                                        .foregroundStyle(selected ? Self.accent : .white.opacity(0.6))
+                                        .foregroundStyle(selected ? Self.accent : Color.primary.opacity(0.6))
                                         .frame(maxWidth: .infinity).frame(height: 28).modifier(Surface(selected: selected, radius: 8))
                                 }.buttonStyle(.plain).disabled(!room.writable.contains("fan-level"))
                             }
@@ -1346,8 +1385,8 @@ struct ControlView: View {
         return HStack(spacing: 7) {
             HStack(spacing: 7) {
                 Image(systemName: AccessoryDetail.icon(item)).font(.system(size: 12))
-                    .foregroundStyle(on ? Self.accent : .white.opacity(0.55)).frame(width: 26, height: 26)
-                    .background(on ? Self.accent.opacity(0.14) : Color.white.opacity(0.05), in: Circle())
+                    .foregroundStyle(on ? Self.accent : Color.primary.opacity(0.55)).frame(width: 26, height: 26)
+                    .background(on ? Self.accent.opacity(0.14) : Color.primary.opacity(0.05), in: Circle())
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 3) {
                         Text(item.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
@@ -1366,8 +1405,8 @@ struct ControlView: View {
             if hasControls && !favorites {
                 Button { detailID = detailID == key ? nil : key } label: {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(detailID == key ? Self.accent : .white.opacity(0.5)).frame(width: 22, height: 22)
-                        .background(Color.white.opacity(detailID == key ? 0.1 : 0.04), in: Circle())
+                        .foregroundStyle(detailID == key ? Self.accent : Color.primary.opacity(0.5)).frame(width: 22, height: 22)
+                        .background(Color.primary.opacity(detailID == key ? 0.1 : 0.04), in: Circle())
                 }.buttonStyle(.plain).help("调节")
             }
         }.padding(.horizontal, 8).frame(height: Self.tileHeight)
@@ -1435,7 +1474,7 @@ struct ControlView: View {
                             if count > 0 {
                                 Button { model.turnOff(area: model.area) } label: {
                                     Label("全关", systemImage: "power").font(.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 9).frame(height: 20)
+                                        .foregroundStyle(Color.primary.opacity(0.7)).padding(.horizontal, 9).frame(height: 20)
                                         .modifier(Surface(radius: 10))
                                 }.buttonStyle(.plain).help("关闭本房间的灯、风扇、净化器、浴霸和空调（不含插座、窗帘）")
                             }
@@ -1468,7 +1507,7 @@ struct ControlView: View {
                     Text(model.authState == "authenticated" ? "同步房间，获取家中设备和状态" : "登录米家，在菜单栏控制家中设备").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Button { if model.authState == "authenticated" { model.resync() } else { model.login() } } label: {
-                    Text(model.authState == "authenticated" ? "同步房间" : "扫码登录米家").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(red: 0.07, green: 0.16, blue: 0.14))
+                    Text(model.authState == "authenticated" ? "同步房间" : "扫码登录米家").font(.system(size: 12, weight: .semibold)).foregroundStyle(Self.onAccent)
                         .padding(.horizontal, 24).padding(.vertical, 11).background(Self.accent, in: Capsule())
                 }.buttonStyle(.plain)
             }
@@ -1484,7 +1523,7 @@ struct ControlView: View {
                     Spacer(minLength: 0)
                 }.frame(height: 16)
             }
-        }.foregroundStyle(Color(red: 1, green: 0.55, blue: 0.5)).padding(.horizontal, 12).padding(.vertical, 9)
+        }.foregroundStyle(Self.alarm).padding(.horizontal, 12).padding(.vertical, 9)
             .background(Color.red.opacity(0.16), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.red.opacity(0.35)))
     }
@@ -1498,11 +1537,11 @@ struct ControlView: View {
             if updater.state != "idle" { ProgressView().controlSize(.mini).frame(width: 12) }
             else { Image(systemName: "arrow.down.circle").font(.system(size: 13)).foregroundStyle(Self.accent) }
             Text(updater.note ?? "发现新版本 \(updater.latest ?? "")").font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.75)).fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(Color.primary.opacity(0.75)).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
             if updater.latest != nil && updater.state == "idle" {
                 Button { updater.install() } label: {
-                    Text("更新").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color(red: 0.07, green: 0.16, blue: 0.14))
+                    Text("更新").font(.system(size: 11, weight: .semibold)).foregroundStyle(Self.onAccent)
                         .padding(.horizontal, 12).padding(.vertical, 5).background(Self.accent, in: Capsule())
                 }.buttonStyle(.plain)
             }
@@ -1536,11 +1575,10 @@ struct ControlView: View {
                 if model.areaRoom != nil || !model.areaAccessories.isEmpty { middleSection }
             } else { loginContent }
             if updater.latest != nil || updater.note != nil { updateBanner }
-            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1)
+            Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)
             footer
         }.padding(.horizontal, 16).padding(.vertical, 10)
             .frame(width: 376, alignment: .topLeading).fixedSize(horizontal: false, vertical: true)
-            .preferredColorScheme(.dark)
             .background(Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .onChange(of: model.area) { _ in detailID = nil; climateExpanded = false }
@@ -1567,7 +1605,7 @@ struct TimerRow: View {
                 }
                 Spacer()
                 Button { model.cancelTimer(id) } label: {
-                    Text("取消定时").font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                    Text("取消定时").font(.system(size: 10, weight: .medium)).foregroundStyle(Color.primary.opacity(0.7))
                         .padding(.horizontal, 10).frame(height: 22).modifier(Surface(radius: 8))
                 }.buttonStyle(.plain)
             } else {
@@ -1575,7 +1613,7 @@ struct TimerRow: View {
                 Spacer()
                 ForEach([1.0, 2.0, 4.0], id: \.self) { hours in
                     Button { model.setTimer(id, hours: hours) } label: {
-                        Text("\(Int(hours)) 小时").font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.7))
+                        Text("\(Int(hours)) 小时").font(.system(size: 10, weight: .medium)).foregroundStyle(Color.primary.opacity(0.7))
                             .padding(.horizontal, 8).frame(height: 22).modifier(Surface(radius: 8))
                     }.buttonStyle(.plain)
                 }
@@ -1673,7 +1711,7 @@ struct AccessoryDetail: View {
             ForEach(Self.controls(item), id: \.address) { prop in control(prop).frame(height: Self.controlHeight(prop)) }
             if AppModel.timerEligible(item) { TimerRow(model: model, id: item.id) }
         }.padding(.horizontal, 10).padding(.vertical, 10)
-            .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 11))
+            .background(Color.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(ControlView.accent.opacity(0.25)))
     }
 
@@ -1691,7 +1729,7 @@ struct AccessoryDetail: View {
                 ForEach([1, 0, 2], id: \.self) { value in
                     if let option = prop.options.first(where: { $0.id == value }) {
                         Button { model.setAccessory(item.id, prop.address, value: Double(value)) } label: {
-                            Text(option.label).font(.system(size: 11, weight: .medium)).foregroundStyle(.white.opacity(0.75))
+                            Text(option.label).font(.system(size: 11, weight: .medium)).foregroundStyle(Color.primary.opacity(0.75))
                                 .frame(maxWidth: .infinity).frame(height: 26).modifier(Surface(radius: 8))
                         }.buttonStyle(.plain)
                     }
@@ -1705,7 +1743,7 @@ struct AccessoryDetail: View {
                         let selected = item.number(prop.address) == Double(option.id)
                         Button { model.setAccessory(item.id, prop.address, value: Double(option.id)) } label: {
                             Text(option.label).font(.system(size: 11, weight: .medium)).lineLimit(1)
-                                .foregroundStyle(selected ? ControlView.accent : .white.opacity(0.65))
+                                .foregroundStyle(selected ? ControlView.accent : Color.primary.opacity(0.65))
                                 .frame(maxWidth: .infinity).frame(height: 22).modifier(Surface(selected: selected, radius: 7))
                         }.buttonStyle(.plain)
                     }
@@ -1718,7 +1756,7 @@ struct AccessoryDetail: View {
                 HStack {
                     Text(label(prop)).font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
-                    Text(formatted(prop, current)).font(.system(size: 11)).monospacedDigit().foregroundStyle(.white.opacity(0.75))
+                    Text(formatted(prop, current)).font(.system(size: 11)).monospacedDigit().foregroundStyle(Color.primary.opacity(0.75))
                 }
                 Slider(value: Binding(get: { min(max(current, range[0]), range[1]) }, set: { drafts[prop.address] = $0 }),
                        in: range[0]...range[1], step: step) { editing in
@@ -1772,13 +1810,12 @@ final class PanelContentView: NSView {
             material.layer?.cornerRadius = 20
             material.layer?.masksToBounds = true
             material.layer?.borderWidth = 1
-            material.layer?.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+            material.layer?.borderColor = Self.borderColor(for: material.effectiveAppearance)
             material.addSubview(content)
             backdrop = material
             usesLiquidGlass = false
         }
         super.init(frame: content.frame)
-        appearance = NSAppearance(named: .darkAqua)
         autoresizingMask = [.width, .height]
         backdrop.autoresizingMask = [.width, .height]
         content.autoresizingMask = [.width, .height]
@@ -1787,6 +1824,16 @@ final class PanelContentView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override var isOpaque: Bool { false }
+
+    static func borderColor(for appearance: NSAppearance) -> CGColor {
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor.white.withAlphaComponent(0.16).cgColor : NSColor.black.withAlphaComponent(0.08).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if !usesLiquidGlass { backdrop.layer?.borderColor = Self.borderColor(for: effectiveAppearance) }
+    }
 
     override func layout() {
         super.layout()
@@ -1816,6 +1863,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         applicationLease = lease
+        if let forced = CommandLine.arguments.first(where: { $0.hasPrefix("--appearance=") }) {
+            NSApp.appearance = Preferences.nsAppearance(String(forced.dropFirst("--appearance=".count)))
+        } else {
+            Preferences.shared.apply()
+        }
         model = AppModel(worker: resources.appendingPathComponent("CloudWorker/CloudWorker"))
         showObserver = DistributedNotificationCenter.default().addObserver(forName: Notification.Name("local.hitachi.menubar.show"), object: nil, queue: .main) { [weak self] _ in
             guard let self = self, self.panel != nil, !self.panel.isVisible else { return }
