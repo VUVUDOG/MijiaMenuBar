@@ -202,6 +202,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // Keyboard ← / → moves between rooms.
+    func stepArea(_ offset: Int) {
+        let names = areas
+        guard let index = names.firstIndex(of: area), !names.isEmpty else { return }
+        selectArea(names[(index + offset + names.count) % names.count])
+    }
+
     func overlaid(_ accessory: Accessory) -> Accessory {
         var item = accessory
         var changes = inFlight?[item.id] ?? [:]
@@ -1201,31 +1208,34 @@ struct ControlView: View {
         return items.isEmpty ? 0 : 12 + 6 + Self.gridHeight(items, detail: nil)
     }
 
-    // MARK: Rooms — one scrollable row
+    // MARK: Rooms — every room visible at once (one row, or two when there are many)
+
+    static let roomChipHeight: CGFloat = 28
+    static func roomColumns(_ count: Int) -> Int { count <= 7 ? max(count, 1) : min(5, (count + 1) / 2) }
+    static func roomRowsHeight(_ count: Int) -> CGFloat {
+        let rows = CGFloat((count + roomColumns(count) - 1) / max(roomColumns(count), 1))
+        return rows * roomChipHeight + max(rows - 1, 0) * 6
+    }
 
     var roomTabs: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(model.areas, id: \.self) { name in
-                        let selected = model.area == name
-                        Button { model.selectArea(name) } label: {
-                            HStack(spacing: 5) {
-                                Circle().fill(model.areaActive(name) ? Self.accent : Color.white.opacity(0.22)).frame(width: 5, height: 5)
-                                Text(name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                if let temperature = model.areaTemperature(name) {
-                                    Text(String(format: "%.1f°", temperature)).font(.system(size: 10)).monospacedDigit()
-                                        .foregroundStyle(.white.opacity(selected ? 0.75 : 0.45))
-                                }
-                            }.foregroundStyle(selected ? Self.accent : .white.opacity(0.7))
-                                .padding(.horizontal, 10).frame(height: 30).modifier(Surface(selected: selected, radius: 15))
-                        }.buttonStyle(.plain).id(name)
-                    }
-                }
-            }.frame(height: 30)
-                .onAppear { proxy.scrollTo(model.area, anchor: .center) }
-                .onChange(of: model.area) { name in withAnimation { proxy.scrollTo(name, anchor: .center) } }
-        }
+        let names = model.areas
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: Self.roomColumns(names.count)), spacing: 6) {
+            ForEach(names, id: \.self) { name in
+                let selected = model.area == name
+                Button { model.selectArea(name) } label: {
+                    Text(name).font(.system(size: 11.5, weight: selected ? .semibold : .medium)).lineLimit(1).minimumScaleFactor(0.75)
+                        .foregroundStyle(selected ? Self.accent : .white.opacity(0.72))
+                        .frame(maxWidth: .infinity).frame(height: Self.roomChipHeight)
+                        .modifier(Surface(selected: selected, radius: 9))
+                        .overlay(alignment: .topTrailing) {
+                            if model.areaActive(name) {
+                                Circle().fill(Self.accent).frame(width: 5, height: 5).padding(4)
+                            }
+                        }
+                }.buttonStyle(.plain)
+                    .help(model.areaTemperature(name).map { "\(name) · 室温 " + String(format: "%.1f°", $0) } ?? name)
+            }
+        }.frame(height: Self.roomRowsHeight(names.count))
     }
 
     // MARK: Air conditioner — one line, expand for mode and fan
@@ -1400,7 +1410,7 @@ struct ControlView: View {
     var middleCap: CGFloat {
         let screen = NSScreen.main?.visibleFrame.height ?? 900
         let top: CGFloat = 10 + 38 + Self.sectionSpacing + floodHeight + (favoritesHeight > 0 ? favoritesHeight + Self.sectionSpacing : 0)
-            + 30 + Self.sectionSpacing
+            + Self.roomRowsHeight(model.areas.count) + Self.sectionSpacing
         let bottom: CGFloat = Self.sectionSpacing + 1 + Self.sectionSpacing + 36 + 10
             + (updater.latest != nil || updater.note != nil ? 46 : 0)
         return max(160, screen * 0.8 - top - bottom)
@@ -1841,6 +1851,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in self?.panel.orderOut(nil) }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
             if event.keyCode == 53 { self?.panel.orderOut(nil); return nil }
+            if event.keyCode == 123 || event.keyCode == 124, let model = self?.model, self?.panel.isVisible == true,
+               !(self?.panel.firstResponder is NSSlider) {
+                model.stepArea(event.keyCode == 124 ? 1 : -1)
+                return nil
+            }
             return event
         }
         if CommandLine.arguments.contains("--show") {

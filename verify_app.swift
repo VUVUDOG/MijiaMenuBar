@@ -406,6 +406,18 @@ if let room = home.areaRoom {
             "Climate card height expanded=\(expanded): \(ControlView.climateHeight(room, expanded: expanded)) vs \(card.fittingSize.height)")
     }
 }
+// Every room fits without scrolling: one row up to seven rooms, two rows beyond.
+expect(ControlView.roomRowsHeight(7) == ControlView.roomChipHeight && ControlView.roomRowsHeight(9) == ControlView.roomChipHeight * 2 + 6,
+    "Room rows: one row up to seven rooms")
+let roomsView = NSHostingView(rootView: RoomProbe(model: home).frame(width: 344))
+expect(abs(roomsView.fittingSize.height - ControlView.roomRowsHeight(home.areas.count)) <= 1, "Room row height matches")
+let firstArea = home.area
+home.stepArea(1); let secondArea = home.area
+home.stepArea(-1)
+expect(secondArea != firstArea && home.area == firstArea, "Arrow keys move between rooms and back")
+home.selectArea(home.areas.last!); home.stepArea(1)
+expect(home.area == home.areas.first, "Stepping past the last room wraps around")
+home.selectArea("主卧")
 let gridItems = home.areaAccessories
 let grid = NSHostingView(rootView: GridProbe(model: home, items: gridItems).frame(width: 344))
 expect(abs(grid.fittingSize.height - ControlView.gridHeight(gridItems, detail: nil)) <= 1,
@@ -507,4 +519,8 @@ struct GridProbe: View {
     @ObservedObject var model: AppModel
     let items: [Accessory]
     var body: some View { ControlView(model: model).tileGrid(items, favorites: false) }
+}
+struct RoomProbe: View {
+    @ObservedObject var model: AppModel
+    var body: some View { ControlView(model: model).roomTabs }
 }
