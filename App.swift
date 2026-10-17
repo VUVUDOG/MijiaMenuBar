@@ -19,8 +19,6 @@ final class ApplicationLease {
 }
 
 struct ControlOption: Identifiable { let id: Int; let label: String }
-// Changes for one room that have been sent, or are waiting to be sent, to the cloud.
-struct ControlCommand { let room: String; var changes: [String: AnyHashable] }
 struct RoomReading: Identifiable {
     let id: String
     let name: String
@@ -91,7 +89,11 @@ final class AppModel: ObservableObject {
     // Optimistic control state: the UI shows these values immediately. `pending`
     // collects the latest intent per room and field; `inFlight` is being sent.
     @Published var pending: [String: [String: AnyHashable]] = [:]
-    @Published var inFlight: ControlCommand?
+    // Device id -> changes currently being sent (several devices go out together).
+    @Published var inFlight: [String: [String: AnyHashable]]?
+    var failedIDs: Set<String>?
+    var cancelledRefresh: Process?
+    @Published var favorites: [String] = UserDefaults.standard.stringArray(forKey: "favorites") ?? []
     var flushWork: DispatchWorkItem?
     @Published var authState = "legacy"
     let runtime: URL
@@ -144,7 +146,7 @@ final class AppModel: ObservableObject {
 
     func overlaid(_ reading: RoomReading) -> RoomReading {
         var room = reading
-        var changes = inFlight?.room == room.id ? inFlight?.changes ?? [:] : [:]
+        var changes = inFlight?[room.id] ?? [:]
         changes.merge(pending[room.id] ?? [:]) { $1 }
         if let value = changes["on"]?.base as? Bool { room.power = value }
         if let value = changes["target-temperature"]?.base as? Double { room.target = value }
@@ -194,7 +196,7 @@ final class AppModel: ObservableObject {
 
     func overlaid(_ accessory: Accessory) -> Accessory {
         var item = accessory
-        var changes = inFlight?.room == item.id ? inFlight?.changes ?? [:] : [:]
+        var changes = inFlight?[item.id] ?? [:]
         changes.merge(pending[item.id] ?? [:]) { $1 }
         for (address, value) in changes where address != "curtain.motor-control" { item.values[address] = value }
         return item
@@ -233,6 +235,7 @@ final class AppModel: ObservableObject {
             phase = status["phase"] ?? "error"
             message = status["message"] ?? "未收到连接状态"
             automaticRefreshSuspended = status["reason"] == "keychain_access"
+            failedIDs = status["failed"].map { Set($0.split(separator: ",").map(String.init)) }
             qr = active && phase == "awaiting_scan" ? NSImage(contentsOf: runtime.appendingPathComponent("login.png")) : nil
             if !active && ["starting", "authenticating", "reading", "awaiting_scan", "controlling"].contains(phase) {
                 phase = authenticated ? "complete" : "logged_out"
@@ -454,6 +457,13 @@ final class AppModel: ObservableObject {
                 guard let self = self else { return }
                 guard self.process === process else { return }
                 self.rememberSession(payload)
+                if self.cancelledRefresh === process {
+                    // A read-only refresh stopped so that a tap can go out right away.
+                    self.cancelledRefresh = nil
+                    self.phase = "complete"; self.message = "设备状态已更新"
+                    self.active = false
+                    return
+                }
                 self.active = false
                 self.poll(forceStatus: true)
                 if (process.terminationStatus != 0 && self.lastStatus == previous && self.phase != "error") || self.busy {
@@ -583,7 +593,7 @@ final class AppModel: ObservableObject {
         guard let room = selected, room.writable.contains(field) else { return }
         var changes = pending[room.id] ?? [:]
         let reported = rooms.first { $0.id == room.id }.map(reportedValue(field)) ?? nil
-        if inFlight?.room != room.id || inFlight?.changes[field] == nil, reported == value {
+        if inFlight?[room.id]?[field] == nil, reported == value {
             changes[field] = nil
         } else {
             changes[field] = value
@@ -600,7 +610,7 @@ final class AppModel: ObservableObject {
         var changes = pending[id] ?? [:]
         let reported = item.values[address]
         let action = address == "curtain.motor-control"
-        if !action, inFlight?.room != id || inFlight?.changes[address] == nil, reported == value {
+        if !action, inFlight?[id]?[address] == nil, reported == value {
             changes[address] = nil
         } else {
             changes[address] = value
@@ -621,27 +631,50 @@ final class AppModel: ObservableObject {
     }
 
     func scheduleFlush(after delay: TimeInterval) {
+        cancelRefresh()
         flushWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.flush() }
         flushWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
+    // A running refresh only reads; stop it so a tap does not wait up to a second behind it.
+    func cancelRefresh() {
+        guard let task = process, task.isRunning, cancelledRefresh == nil,
+              let arguments = task.arguments, arguments.contains("--refresh"),
+              !arguments.contains("--field"), !arguments.contains("--batch") else { return }
+        cancelledRefresh = task
+        task.terminate()
+    }
+
+    static func json(_ value: Any) -> String? {
+        (try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]))
+            .flatMap { String(data: $0, encoding: .utf8) }
+    }
+
     func flush() {
         flushWork = nil
         guard inFlight == nil, !busy, !pending.isEmpty else { return }
-        let id = pending[selectedID] != nil ? selectedID : pending.keys.sorted()[0]
-        guard let name = displayName(id), let changes = pending[id] else { pending[id] = nil; return }
-        var arguments = ["--room", id]
-        let order = ["on", "mode", "target-temperature", "fan-level"]
-        for field in order + changes.keys.filter({ !order.contains($0) }).sorted() {
-            guard let value = changes[field], let data = try? JSONSerialization.data(withJSONObject: value.base, options: [.fragmentsAllowed]),
-                  let json = String(data: data, encoding: .utf8) else { continue }
-            arguments += ["--field", field, "--value", json]
+        let batch = pending.filter { displayName($0.key) != nil }
+        pending = [:]
+        guard !batch.isEmpty else { return }
+        var arguments: [String]
+        if batch.count == 1, let (id, changes) = batch.first {
+            arguments = ["--room", id]
+            let order = ["on", "mode", "target-temperature", "fan-level"]
+            for field in order + changes.keys.filter({ !order.contains($0) }).sorted() {
+                guard let value = changes[field], let json = Self.json(value.base) else { continue }
+                arguments += ["--field", field, "--value", json]
+            }
+        } else {
+            // Several devices (e.g. turning everything off) are controlled in one parallel run.
+            guard let json = Self.json(batch.mapValues { $0.mapValues(\.base) }) else { return }
+            arguments = ["--batch", json]
         }
-        inFlight = ControlCommand(room: id, changes: changes)
-        pending[id] = nil
-        run(arguments: arguments, label: "正在同步到\(name)…")
+        inFlight = batch
+        failedIDs = nil
+        let label = batch.count == 1 ? "正在同步到\(displayName(batch.keys.first!) ?? "设备")…" : "正在同步 \(batch.count) 个设备…"
+        run(arguments: arguments, label: label)
         if !active { workerFinished() }
     }
 
@@ -649,18 +682,81 @@ final class AppModel: ObservableObject {
     // the panel returns to the last confirmed state. Newer intents still go out.
     func workerFinished() {
         guard !active else { return }
-        if let command = inFlight {
+        if let batch = inFlight {
             inFlight = nil
             if phase != "complete" {
-                pending[command.room] = pending[command.room]?.filter { command.changes[$0.key] == nil || $0.value != command.changes[$0.key] }
-                if pending[command.room]?.isEmpty == true { pending[command.room] = nil }
-                if let name = displayName(command.room), !message.contains(name) {
+                // The worker names the devices that failed; otherwise treat the whole batch as failed.
+                let failed = failedIDs ?? Set(batch.keys)
+                for id in failed {
+                    guard let sent = batch[id] else { continue }
+                    pending[id] = pending[id]?.filter { sent[$0.key] == nil || $0.value != sent[$0.key] }
+                    if pending[id]?.isEmpty == true { pending[id] = nil }
+                }
+                if failed.count == 1, let name = displayName(failed.first!), !message.contains(name) {
                     message = "\(name)未调整成功，已恢复原状态：\(message)"
+                } else if failed.count > 1, !message.contains("已恢复") {
+                    message = "\(failed.count) 个设备未调整成功，已恢复原状态：\(message)"
                 }
             }
             updateTitle()
         }
         if !pending.isEmpty { scheduleFlush(after: 0.05) }
+    }
+
+    // MARK: Turn everything off
+
+    // Lights, fans, purifiers, bath heaters and air conditioners; never outlets or curtains.
+    func offChanges(_ item: Accessory) -> [String: AnyHashable] {
+        guard item.online else { return [:] }
+        var changes: [String: AnyHashable] = [:]
+        for address in ["light.on", "fan.on", "air-purifier.on"] where item.prop(address)?.writable == true {
+            if item.values[address]?.base as? Bool == true { changes[address] = false }
+        }
+        if item.prop("ptc-bath-heater.mode")?.writable == true, let mode = item.number("ptc-bath-heater.mode"), mode != 0 {
+            changes["ptc-bath-heater.mode"] = 0.0
+        }
+        return item.kind == "outlet" || item.kind == "curtain" ? [:] : changes
+    }
+
+    func offTargets(_ name: String?) -> [String: [String: AnyHashable]] {
+        var targets: [String: [String: AnyHashable]] = [:]
+        for room in rooms where name == nil || room.area == name {
+            if overlaid(room).power == true, room.writable.contains("on") { targets[room.id] = ["on": false] }
+        }
+        for item in accessories where name == nil || item.room == name {
+            let changes = offChanges(overlaid(item))
+            if !changes.isEmpty { targets[item.id] = changes }
+        }
+        return targets
+    }
+
+    @discardableResult
+    func turnOff(area name: String?) -> Int {
+        let targets = offTargets(name)
+        for (id, changes) in targets { pending[id, default: [:]].merge(changes) { $1 } }
+        if !targets.isEmpty { updateTitle(); scheduleFlush(after: 0.05) }
+        return targets.count
+    }
+
+    // MARK: Favourites
+
+    var favoriteAccessories: [Accessory] {
+        favorites.compactMap { id in accessories.first { $0.id == id }.map(overlaid) }
+    }
+    func toggleFavorite(_ id: String) {
+        if favorites.contains(id) { favorites.removeAll { $0 == id } } else { favorites.append(id) }
+        UserDefaults.standard.set(favorites, forKey: "favorites")
+    }
+    // One click on a favourite: switch it, or open / close a curtain.
+    func quickToggle(_ item: Accessory) {
+        if let primary = item.primary {
+            setAccessory(item.id, primary, value: !(item.values[primary]?.base as? Bool ?? false))
+        } else if item.kind == "curtain" {
+            let open = (item.number("curtain.current-position") ?? 0) > 0
+            setAccessory(item.id, "curtain.motor-control", value: open ? 2.0 : 1.0)
+        } else if item.prop("light.on")?.writable == true {
+            setAccessory(item.id, "light.on", value: !(item.values["light.on"]?.base as? Bool ?? false))
+        }
     }
 }
 
@@ -882,6 +978,7 @@ struct ControlView: View {
     @ObservedObject var updater = Updater.shared
     @State private var draft = 26.0
     @State private var expandedID: String?
+    @State private var confirmOffAll = false
     static let accent = Color(red: 0.45, green: 0.84, blue: 0.77)
 
     func roomIcon(_ name: String) -> String {
@@ -908,6 +1005,27 @@ struct ControlView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer()
+            if model.hasDevices {
+                let count = model.offTargets(nil).count
+                Button {
+                    if confirmOffAll {
+                        confirmOffAll = false
+                        model.turnOff(area: nil)
+                    } else {
+                        confirmOffAll = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { confirmOffAll = false }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "power").font(.system(size: 12, weight: .semibold))
+                        if confirmOffAll { Text("确认全关 \(count) 个").font(.system(size: 11, weight: .semibold)) }
+                    }.foregroundStyle(confirmOffAll ? Color.orange : .white.opacity(count > 0 ? 0.65 : 0.25))
+                        .frame(minWidth: 34, minHeight: 34).padding(.horizontal, confirmOffAll ? 10 : 0)
+                        .background((confirmOffAll ? Color.orange.opacity(0.14) : Color.white.opacity(0.045)), in: Capsule())
+                }.buttonStyle(.plain).disabled(count == 0)
+                    .help(count > 0 ? "全屋全关：灯、风扇、净化器、浴霸和空调（不含插座、窗帘）" : "没有开着的设备")
+                    .accessibilityLabel("全屋全关")
+            }
             Menu {
                 Button("同步房间") { model.resync() }.disabled(model.busy || (!model.hasDevices && model.authState != "authenticated"))
                 Button(!model.hasDevices ? "扫码登录米家" : "重新登录米家") { model.login() }.disabled(model.controlling)
@@ -930,6 +1048,37 @@ struct ControlView: View {
                     .foregroundStyle(.white.opacity(0.65)).frame(width: 34, height: 34)
                     .background(Color.white.opacity(0.045), in: Circle())
             }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("设置")
+        }
+    }
+
+    var favoritesHeight: CGFloat {
+        let count = model.favoriteAccessories.count
+        return count == 0 ? 0 : CGFloat((count + 1) / 2) * 44 + 24
+    }
+
+    // Starred devices, reachable without switching rooms. Click switches; right-click removes.
+    var favoritesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("常用").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).frame(height: 12)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                ForEach(model.favoriteAccessories) { item in
+                    let on = item.isOn == true
+                    Button { model.quickToggle(item) } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: AccessoryRow.icon(item)).font(.system(size: 11))
+                                .foregroundStyle(on ? Self.accent : .white.opacity(0.5)).frame(width: 16)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(item.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                                Text(item.online ? item.room : "离线").font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
+                            }
+                            Spacer(minLength: 0)
+                        }.foregroundStyle(on ? Self.accent : .white.opacity(0.7))
+                            .padding(.horizontal, 9).frame(height: 38).modifier(Surface(selected: on, radius: 10))
+                            .opacity(item.online ? 1 : 0.5)
+                    }.buttonStyle(.plain).disabled(!item.online)
+                        .contextMenu { Button("移出常用") { model.toggleFavorite(item.id) } }
+                }
+            }
         }
     }
 
@@ -960,14 +1109,23 @@ struct ControlView: View {
     func accessoryList(_ items: [Accessory], withClimate: Bool) -> some View {
         let screen = NSScreen.main?.visibleFrame.height ?? 900
         // About 700pt (with an air conditioner card) or 300pt (without) is used by the rest of the panel.
-        let cap = max(150, min(withClimate ? 360 : 640, screen - (withClimate ? 720 : 310)))
+        let cap = max(150, min(withClimate ? 360 : 640, screen - (withClimate ? 720 : 310) - favoritesHeight))
         let content = items.reduce(0) { $0 + AccessoryRow.height($1, expanded: expandedID == $1.id) + 6 }
         return VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("设备").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                Text(model.favorites.isEmpty ? "\(items.count) 个 · 右键加入常用" : "\(items.count) 个")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
                 Spacer()
-                Text("\(items.count) 个").font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
+                let count = model.offTargets(model.area).count
+                if count > 0 {
+                    Button { model.turnOff(area: model.area) } label: {
+                        Label("全关", systemImage: "power").font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 9).frame(height: 20)
+                            .modifier(Surface(radius: 10))
+                    }.buttonStyle(.plain).help("关闭本房间的灯、风扇、净化器、浴霸和空调（不含插座、窗帘）")
+                }
+            }.frame(height: 20)
             ScrollView(.vertical, showsIndicators: content > cap) {
                 VStack(spacing: 6) {
                     ForEach(items) { item in
@@ -1129,6 +1287,7 @@ struct ControlView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             if model.hasDevices {
+                if !model.favoriteAccessories.isEmpty { favoritesSection }
                 roomTabs
                 if let room = model.areaRoom {
                     temperatureCard(room)
@@ -1180,7 +1339,8 @@ struct AccessoryRow: View {
         return rowHeight + parts.reduce(0) { $0 + controlHeight($1) } + CGFloat(parts.count) * 8
     }
 
-    var icon: String {
+    var icon: String { Self.icon(item) }
+    static func icon(_ item: Accessory) -> String {
         switch item.kind {
         case "light": return item.group ? symbol("lightbulb.2", fallback: "lightbulb") : "lightbulb"
         case "curtain": return symbol("blinds.horizontal.closed", fallback: "rectangle.split.3x1")
@@ -1248,7 +1408,12 @@ struct AccessoryRow: View {
                     .frame(width: 28, height: 28)
                     .background((item.isOn == true ? ControlView.accent.opacity(0.14) : Color.white.opacity(0.05)), in: Circle())
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        if model.favorites.contains(item.id) {
+                            Image(systemName: "star.fill").font(.system(size: 8)).foregroundStyle(ControlView.accent.opacity(0.8))
+                        }
+                    }
                     Text(summary).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 4)
@@ -1269,6 +1434,9 @@ struct AccessoryRow: View {
         }.padding(.horizontal, 10).padding(.vertical, 8)
             .opacity(item.online ? 1 : 0.5)
             .modifier(Surface(radius: 11))
+            .contextMenu {
+                Button(model.favorites.contains(item.id) ? "移出常用" : "加入常用") { model.toggleFavorite(item.id) }
+            }
     }
 
     @ViewBuilder func control(_ prop: AccessoryProp) -> some View {

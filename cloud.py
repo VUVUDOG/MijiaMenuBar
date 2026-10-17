@@ -147,6 +147,23 @@ class XiaomiCloud:
             resolved.append((service, prop, value))
         return self._apply(device, resolved, "设备控制未成功")
 
+    def set_stored(self, device, props, values):
+        """Accessory control from the property metadata saved at sync time (no spec download)."""
+        by_address = {p["address"]: p for p in props}
+        resolved = []
+        for address, value in values.items():
+            meta = by_address.get(address)
+            if not meta or not meta.get("writable"):
+                raise CloudError("该设备不支持这个控制功能")
+            prop = {"iid": meta["piid"], "format": meta.get("format") or "",
+                    "access": ["write"] + (["read"] if meta.get("readable") else [])}
+            if meta.get("range"):
+                prop["value-range"] = meta["range"]
+            if meta.get("options"):
+                prop["value-list"] = meta["options"]
+            resolved.append(({"iid": meta["siid"]}, prop, value))
+        return self._apply(device, resolved, "设备控制未成功")
+
     @staticmethod
     def _validate(prop, value):
         if "write" not in prop.get("access", []):
@@ -203,8 +220,9 @@ class XiaomiCloud:
         # A successful acknowledgement is not sufficient: read back every changed value.
         # Poll quickly so a confirmed change is reported as soon as the cloud reflects it.
         query = [{k: v for k, v in change.items() if k != "value"} for change, _ in checks]
-        for _ in range(10):
-            time.sleep(0.4)
+        # Check early, then back off: most devices confirm within half a second.
+        for delay in (0.15, 0.25, 0.3, 0.3, 0.4, 0.4, 0.5, 0.5, 0.6, 0.6):
+            time.sleep(delay)
             state = self.api("miotspec/prop/get", {"params": query}) or []
             if all(any(p.get("code") == 0 and self._matches(prop, change["value"], p.get("value")) and
                        p.get("siid") == change["siid"] and p.get("piid") == change["piid"] for p in state)
@@ -212,13 +230,29 @@ class XiaomiCloud:
                 return result
         raise CloudError("指令已发送，但暂未确认设备状态；请刷新查看")
 
+    def fork(self):
+        """A client for another thread: same login and spec cache, separate HTTP session."""
+        client = XiaomiCloud(self.credentials)
+        client._instances = self._instances
+        return client
+
     def read_addresses(self, items):
-        """items: [(did, address, siid, piid)] -> {did: {address: value}} using batched reads."""
-        values = {}
-        for start in range(0, len(items), 10):
-            chunk = items[start:start + 10]
-            state = self.api("miotspec/prop/get", {"params": [
+        """items: [(did, address, siid, piid)] -> {did: {address: value}}; batches of 10 read in parallel."""
+        from concurrent.futures import ThreadPoolExecutor
+        chunks = [items[start:start + 10] for start in range(0, len(items), 10)]
+
+        def fetch(chunk):
+            return chunk, self.fork().api("miotspec/prop/get", {"params": [
                 {"did": did, "siid": siid, "piid": piid} for did, _, siid, piid in chunk]}) or []
+
+        if len(chunks) <= 1:
+            results = [(chunk, self.api("miotspec/prop/get", {"params": [
+                {"did": did, "siid": siid, "piid": piid} for did, _, siid, piid in chunk]}) or []) for chunk in chunks]
+        else:
+            with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as pool:
+                results = list(pool.map(fetch, chunks))
+        values = {}
+        for chunk, state in results:
             for did, address, siid, piid in chunk:
                 match = next((p for p in state if p.get("did") == did and p.get("siid") == siid
                               and p.get("piid") == piid and p.get("code") == 0 and "value" in p), None)

@@ -55,5 +55,33 @@ class AccessoryTests(unittest.TestCase):
                 cloud.set_addresses({"did": "d"}, spec, {address: value})
 
 
+    def test_stored_metadata_controls_without_downloading_specs(self):
+        props = probe.accessory_props(LIGHT)
+        cloud = XiaomiCloud()
+        sent = []
+        cloud._request = lambda path, payload: sent.append(payload) or [{"code": 0}]
+        cloud.api = lambda path, payload: [{"siid": 2, "piid": 1, "code": 0, "value": True}]
+        cloud.spec = lambda model: self.fail("control must not download specs")
+        with patch("cloud.time.sleep"):
+            cloud.set_stored({"did": "l"}, props, {"light.on": True})
+        self.assertEqual(sent[0]["params"], [{"did": "l", "siid": 2, "piid": 1, "value": True}])
+        with self.assertRaises(CloudError):
+            cloud.set_stored({"did": "l"}, props, {"light.brightness": 0})
+
+    def test_batch_reports_each_failure_separately(self):
+        report = {"devices": [], "accessories": [
+            {"device": {"did": "ok"}, "props": probe.accessory_props(LIGHT)},
+            {"device": {"did": "bad"}, "props": probe.accessory_props(LIGHT)}]}
+        def request(self_, path, payload):
+            did = payload["params"][0]["did"]
+            return [{"code": 0 if did == "ok" else -704042011}]
+        with patch.object(XiaomiCloud, "_request", request), \
+             patch.object(XiaomiCloud, "api", lambda self_, path, payload: [{"siid": 2, "piid": 1, "code": 0, "value": False}]), \
+             patch("cloud.time.sleep"):
+            failures = probe.control_devices(XiaomiCloud({"user_id": "u", "ssecurity": "s", "service_token": "t"}), report,
+                                             {"ok": {"light.on": False}, "bad": {"light.on": False}, "missing": {"light.on": False}})
+        self.assertEqual(set(failures), {"bad", "missing"})
+
+
 if __name__ == "__main__":
     unittest.main()

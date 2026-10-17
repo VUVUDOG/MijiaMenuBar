@@ -28,11 +28,17 @@ if (runtime / "deny-keychain").exists():
     status = {"generation": auth["generation"], "phase": "error", "message": "钥匙串未授权", "reason": "keychain_access"}
     (runtime / "status.json").write_text(json.dumps(status))
     sys.exit(1)
-if "--field" in sys.argv:
+if "--refresh" in sys.argv and (runtime / "slow-refresh").exists():
+    import time
+    time.sleep(5)
+if "--field" in sys.argv or "--batch" in sys.argv:
     with (runtime / "controls.jsonl").open("a") as log:
         log.write(json.dumps(sys.argv[1:]) + "\\n")
     if (runtime / "fail-control").exists():
         status = {"generation": auth["generation"], "phase": "error", "message": "指令已发送，但暂未确认设备状态"}
+        failed = (runtime / "fail-control").read_text().strip()
+        if failed:
+            status["failed"] = failed
         (runtime / "status.json").write_text(json.dumps(status))
         sys.exit(1)
 if "--logout" in sys.argv:

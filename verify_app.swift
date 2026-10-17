@@ -331,6 +331,53 @@ settleQueue(home)
 home.setAccessory("c1", "curtain.motor-control", value: 1.0)
 settleQueue(home)
 expect(accessoryControls().count == curtainBefore + 2, "Curtain actions are sent every time, even when repeated")
+// Turning everything off: scope, exclusions, one batched run, partial failure.
+home.selectArea("主卧")
+settleQueue(home)
+let homeOff = home.offTargets(nil)
+expect(Set(homeOff.keys) == ["group", "test-room"] && homeOff["test-room"] == ["on": AnyHashable(false)],
+    "Whole-home off covers lights and air conditioners that are on, never curtains: \(homeOff.keys)")
+let kitchenOff = home.offTargets("厨房")
+expect(kitchenOff.isEmpty, "Room off only covers that room")
+let batchBefore = accessoryControls().count
+try "group".write(to: accessoryRuntime.appendingPathComponent("fail-control"), atomically: true, encoding: .utf8)
+expect(home.turnOff(area: nil) == 2, "Whole-home off queues every target")
+expect(home.areaAccessories.allSatisfy { $0.isOn != true }, "Everything shows off immediately")
+settleQueue(home)
+let batchArgs = accessoryControls().last!
+expect(accessoryControls().count == batchBefore + 1 && batchArgs.first == "--batch", "Several devices go out in one batched run")
+expect(batchArgs[1].contains("test-room") && batchArgs[1].contains("group"), "The batch carries every device")
+expect(home.areaAccessories.first { $0.id == "group" }?.isOn == true && home.message.contains("主卧筒灯未调整成功"),
+    "Only the device the worker reports as failed is named and reverted: \(home.message)")
+try FileManager.default.removeItem(at: accessoryRuntime.appendingPathComponent("fail-control"))
+
+// A tap stops a running refresh instead of waiting behind it.
+try Data().write(to: accessoryRuntime.appendingPathComponent("slow-refresh"))
+home.refresh()
+RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+expect(home.active && home.process?.arguments?.contains("--refresh") == true, "Refresh must be running")
+let tapStart = Date()
+home.setAccessory("lamp", "light.on", value: true)
+settleQueue(home)
+expect(Date().timeIntervalSince(tapStart) < 2.5 && home.phase == "complete", "A tap must not wait for the slow refresh")
+try FileManager.default.removeItem(at: accessoryRuntime.appendingPathComponent("slow-refresh"))
+
+// Favourites persist and toggle without switching rooms.
+UserDefaults.standard.removeObject(forKey: "favorites")
+home.favorites = []
+home.toggleFavorite("c1"); home.toggleFavorite("lamp")
+expect(home.favoriteAccessories.map(\.id) == ["c1", "lamp"] && UserDefaults.standard.stringArray(forKey: "favorites") == ["c1", "lamp"],
+    "Favourites keep their order and persist")
+home.quickToggle(home.favoriteAccessories[1])
+expect(home.pending["lamp"]?["light.on"] == AnyHashable(true), "Clicking a favourite light switches it")
+settleQueue(home)
+home.quickToggle(home.favoriteAccessories[0])
+expect(home.pending["c1"]?["curtain.motor-control"] == AnyHashable(2.0), "Clicking an open curtain closes it")
+settleQueue(home)
+home.toggleFavorite("c1")
+expect(home.favorites == ["lamp"], "Favourites can be removed")
+UserDefaults.standard.removeObject(forKey: "favorites")
+
 func accessoryControls() -> [[String]] {
     guard let text = try? String(contentsOf: accessoryRuntime.appendingPathComponent("controls.jsonl"), encoding: .utf8) else { return [] }
     return text.split(separator: "\n").map { try! JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String] }
@@ -351,7 +398,7 @@ for raw in realReport["accessories"] as? [[String: Any]] ?? [] {
         expect(abs(actual - estimate) <= 1, "Row height estimate for \(item.kind) expanded=\(expanded): \(estimate) vs \(actual)")
     }
 }
-print("Native accessories: rooms, groups, optimistic queue, merged commands, revert and curtain actions passed")
+print("Native accessories: rooms, groups, optimistic queue, merged commands, revert, curtain actions, turn-off batches, refresh preemption and favourites passed")
 
 let leaseRuntime = testRuntime.appendingPathComponent("lease-test")
 try FileManager.default.createDirectory(at: leaseRuntime, withIntermediateDirectories: true)

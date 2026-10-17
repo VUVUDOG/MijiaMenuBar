@@ -71,12 +71,19 @@ def pair_sensor(item, sensors):
 
 
 def read_climate(cloud, report):
-    for sensor in report.get("sensors", []):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def read(sensor):
         try:
-            sensor["values"], sensor["codes"] = cloud.read_climate(sensor["device"]["did"], sensor["fields"])
+            sensor["values"], sensor["codes"] = cloud.fork().read_climate(sensor["device"]["did"], sensor["fields"])
         except (CloudError, requests.RequestException, ValueError, KeyError):
             sensor["values"], sensor["codes"] = {}, {"temperature": "error"}
         sensor["read_at"] = time.time()
+
+    sensors = report.get("sensors", [])
+    if sensors:
+        with ThreadPoolExecutor(max_workers=min(6, len(sensors))) as pool:
+            list(pool.map(read, sensors))
     for item in report["devices"]:
         sensor = pair_sensor(item, report.get("sensors", []))
         item["climate"] = None if not sensor else {
@@ -172,6 +179,33 @@ def read_accessories(cloud, accessories):
             accessory["read_at"] = time.time()
 
 
+def control_devices(cloud, report, commands):
+    """Send commands for several devices in parallel; returns {did: error message} for failures."""
+    from concurrent.futures import ThreadPoolExecutor
+    acs = {d["device"]["did"]: d for d in report["devices"]}
+    accessories = {a["device"]["did"]: a for a in report.get("accessories", [])}
+
+    def run(did, changes):
+        # Each thread gets its own HTTP session.
+        client = XiaomiCloud(cloud.credentials)
+        try:
+            if did in accessories:
+                client.set_stored(accessories[did]["device"], accessories[did]["props"], changes)
+            elif did in acs and acs[did].get("spec"):
+                client.set_properties(acs[did]["device"], acs[did]["spec"], changes)
+            else:
+                raise CloudError("没有找到这个设备")
+        except CloudError as exc:
+            return did, str(exc)
+        except requests.RequestException:
+            return did, "连接米家服务失败，请稍后重试"
+        return did, None
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(commands)))) as pool:
+        results = list(pool.map(lambda item: run(*item), commands.items()))
+    return {did: error for did, error in results if error}
+
+
 def main(argv=None):
     global store, session_output
     parser = argparse.ArgumentParser()
@@ -182,6 +216,7 @@ def main(argv=None):
     parser.add_argument("--field", action="append",
                         help="控制属性（空调字段或配件地址如 light.on），可重复；与 --value 按顺序配对")
     parser.add_argument("--scope", help="刷新时只读取该房间的配件")
+    parser.add_argument("--batch", help="JSON：{设备标识: {属性: 值}}，多个设备并行控制")
     parser.add_argument("--value", action="append", help="JSON 控制值，可重复")
     parser.add_argument("--import-session", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--session-stdin", action="store_true", help=argparse.SUPPRESS)
@@ -233,7 +268,7 @@ def main(argv=None):
             # The native app captures this pipe privately. No credentials go in
             # argv, environment, logs, status.json or other runtime files.
             print(json.dumps({"generation": store.generation, "session": cloud.credentials}), flush=True)
-        if args.room or args.field or args.value or args.refresh:
+        if args.batch or args.room or args.field or args.value or args.refresh:
             if not (RUNTIME / "report.json").exists():
                 raise CloudError("请先同步空调设备")
             report = json.loads((RUNTIME / "report.json").read_text())
@@ -251,39 +286,49 @@ def main(argv=None):
                 except (CloudError, requests.RequestException, ValueError, KeyError):
                     pass
             targets = report["devices"]
-            if args.room or args.field or args.value:
-                if not (args.room and args.field and args.value and len(args.field) == len(args.value)):
-                    raise CloudError("控制指令缺少房间、属性或数值")
-                changes = {field: json.loads(value) for field, value in zip(args.field, args.value)}
-                matches = [d for d in report["devices"] if d["device"]["did"] == args.room]
-                accessory = next((a for a in report.get("accessories", []) if a["device"]["did"] == args.room), None)
-                if accessory:
-                    allowed = {p["address"]: p for p in accessory["props"] if p["writable"]}
-                    if not set(changes) <= set(allowed):
-                        raise CloudError("该设备不支持这个控制功能")
-                    status("controlling", "正在发送指令并确认设备状态…")
-                    spec = cloud.spec(accessory["device"]["model"])
-                    cloud.set_addresses(accessory["device"], spec, changes)
-                    read_accessories(cloud, [accessory])
-                    targets = []
+            if args.batch or args.room or args.field or args.value:
+                if args.batch:
+                    commands = json.loads(args.batch)
+                elif args.room and args.field and args.value and len(args.field) == len(args.value):
+                    commands = {args.room: {f: json.loads(v) for f, v in zip(args.field, args.value)}}
                 else:
-                    if len(matches) != 1 or not matches[0].get("spec"):
-                        raise CloudError("没有找到已验证的空调设备")
-                    status("controlling", "正在发送指令并确认设备状态…")
-                    item = matches[0]
-                    cloud.set_properties(item["device"], item["spec"], changes)
-                    # Only the controlled room changed; other rooms keep their last reading.
-                    targets = [item]
-            else:
-                status("reading", "正在刷新空调状态…")
-            for item in targets:
+                    raise CloudError("控制指令缺少房间、属性或数值")
+                status("controlling", "正在发送指令并确认设备状态…")
+                failures = control_devices(cloud, report, commands)
+                # Only the controlled devices changed; everything else keeps its last reading.
+                targets = [d for d in report["devices"] if d["device"]["did"] in commands]
+                read_accessories(cloud, [a for a in report.get("accessories", []) if a["device"]["did"] in commands])
+                for item in targets:
+                    if item.get("spec"):
+                        item["state"] = cloud.read_state(item["device"], item["spec"])
+                report["read_at"] = time.time()
+                write_json("report.json", report)
+                if failures:
+                    names = {d["device"]["did"]: d["device"].get("name") for d in
+                             report["devices"] + report.get("accessories", [])}
+                    first = next(iter(failures.values()))
+                    label = "、".join(names.get(did) or "设备" for did in failures)
+                    write_json("status.json", {"phase": "error", "message": f"{label}：{first}",
+                                               "failed": ",".join(failures)})
+                    return 1
+                status("complete", "指令已执行，云端回读已确认")
+                return 0
+            status("reading", "正在刷新空调状态…")
+            # Air conditioners, thermometers and the room's accessories are read in parallel.
+            # Accessories are many: refresh only the room being looked at.
+            from concurrent.futures import ThreadPoolExecutor
+            scoped = [a for a in report.get("accessories", []) if not args.scope or a["room"] == args.scope]
+
+            def read_ac(item):
                 if item.get("spec"):
-                    item["state"] = cloud.read_state(item["device"], item["spec"])
-            if not args.field:
-                read_climate(cloud, report)
-                # Accessories are many: refresh only the room being looked at.
-                scoped = [a for a in report.get("accessories", []) if not args.scope or a["room"] == args.scope]
-                read_accessories(cloud, scoped)
+                    item["state"] = cloud.fork().read_state(item["device"], item["spec"])
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                jobs = [pool.submit(read_ac, item) for item in targets]
+                jobs.append(pool.submit(read_climate, cloud, report))
+                jobs.append(pool.submit(read_accessories, cloud.fork(), scoped))
+                for job in jobs:
+                    job.result()
             report["read_at"] = time.time()
             write_json("report.json", report)
             status("complete", "设备状态已更新" if not args.field else "指令已执行，云端回读已确认")
