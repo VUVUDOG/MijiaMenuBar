@@ -127,12 +127,17 @@ class XiaomiCloud:
         """Resolve "service-kind.property-kind" (e.g. light.brightness) to one property.
 
         The first matching service wins; when a service repeats a property kind,
-        the one with a value list (named options) is preferred."""
+        the one with a value list (named options) is preferred. A "#n" suffix picks the
+        n-th property of that kind instead (e.g. fan-control.fan-level#2)."""
         service_kind, _, prop_kind = address.partition(".")
+        prop_kind, _, nth = prop_kind.partition("#")
         for service in spec.get("services", []):
             if cls.kind(service.get("type")) != service_kind:
                 continue
             matches = [p for p in service.get("properties", []) if cls.kind(p.get("type")) == prop_kind]
+            if nth:
+                index = int(nth) - 1
+                return (service, matches[index]) if 0 <= index < len(matches) else (None, None)
             if matches:
                 return service, next((p for p in matches if p.get("value-list")), matches[0])
         return None, None

@@ -1746,6 +1746,7 @@ struct AccessoryDetail: View {
     func label(_ prop: AccessoryProp) -> String {
         // The range hood's purifier service is its smoke purification, not a second power switch.
         if item.kind == "hood" && prop.address == "air-purifier.on" { return "净化" }
+        if prop.address == "fan-control.fan-level#2" { return "换气档位" }
         return Self.label(prop)
     }
     static func label(_ prop: AccessoryProp) -> String {
@@ -1800,7 +1801,8 @@ struct AccessoryDetail: View {
         default:
             let light = item.values["light.on"]?.base as? Bool == true ? "照明开" : nil
             let temp = item.number("environment.temperature").map { String(format: "%.0f°", $0) }
-            let vent = item.values["ptc-bath-heater.ventilation"]?.base as? Bool == true ? "换气" : nil
+            let vent = item.values["ptc-bath-heater.ventilation"]?.base as? Bool == true
+                ? "换气" + (option(item, "fan-control.fan-level#2").map { " " + $0 } ?? "") : nil
             return [option(item, "ptc-bath-heater.mode") ?? "—", vent, light, temp].compactMap { $0 }.joined(separator: " · ")
         }
     }

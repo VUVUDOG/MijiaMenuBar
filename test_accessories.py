@@ -125,5 +125,22 @@ class AccessoryTests(unittest.TestCase):
         self.assertNotIn("fan-control.fan-level", {p["address"] for p in probe.accessory_props(heater)})
 
 
+    def test_bath_heater_ventilation_level_is_the_second_fan_level(self):
+        heater = {"type": "urn:miot-spec-v2:device:bath-heater:1", "services": [
+            {"iid": 4, "type": "urn:miot-spec-v2:service:ptc-bath-heater:1", "properties": [
+                {"iid": 8, "type": "urn:miot-spec-v2:property:ventilation:1", "format": "bool", "access": ["read", "write"]}]},
+            {"iid": 5, "type": "urn:miot-spec-v2:service:fan-control:1", "properties": [
+                {"iid": 7, "type": "urn:miot-spec-v2:property:fan-level:1", "format": "uint8", "access": ["read", "write"],
+                 "value-list": [{"value": 0, "description": "Low"}, {"value": 1, "description": "High"}]},
+                {"iid": 8, "type": "urn:miot-spec-v2:property:fan-level:1", "format": "uint8", "access": ["read", "write"],
+                 "value-list": [{"value": 0, "description": "Low"}, {"value": 1, "description": "High"}]}]}]}
+        props = probe.accessory_props(heater)
+        addresses = [p["address"] for p in props]
+        self.assertEqual(addresses[addresses.index("ptc-bath-heater.ventilation") + 1], "fan-control.fan-level#2")
+        level = next(p for p in props if p["address"] == "fan-control.fan-level#2")
+        self.assertEqual((level["siid"], level["piid"], level["writable"]), (5, 8, True))
+        self.assertEqual(XiaomiCloud.find_property(heater, "fan-control.fan-level#3"), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

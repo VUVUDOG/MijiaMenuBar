@@ -514,6 +514,16 @@ expect(timed.offChanges(ventilating) == ["ptc-bath-heater.ventilation": AnyHasha
 expect(AccessoryDetail.controls(ventilating).contains { $0.address == "ptc-bath-heater.ventilation" && $0.isBool },
     "Ventilation is offered as a switch")
 expect(AccessoryDetail.summary(ventilating).contains("换气"), "The tile shows ventilation")
+let ventLevel = AppModel.accessory(["device": ["did": "bath2", "name": "浴霸", "isOnline": true], "room": "卫生间",
+    "kind": "bath-heater", "group": false, "props": [
+        ["address": "ptc-bath-heater.ventilation", "format": "bool", "readable": true, "writable": true],
+        ["address": "fan-control.fan-level#2", "format": "uint8", "readable": true, "writable": true,
+         "options": [["value": 0, "description": "Low"], ["value": 1, "description": "High"]]]],
+    "state": ["ptc-bath-heater.ventilation": true, "fan-control.fan-level#2": 1]])!
+expect(AccessoryDetail(item: ventLevel, model: timed).label(ventLevel.prop("fan-control.fan-level#2")!) == "换气档位",
+    "Ventilation level label")
+expect(ventLevel.prop("fan-control.fan-level#2")!.options.map(\.label) == ["低", "高"], "Ventilation level options")
+expect(AccessoryDetail.summary(ventLevel).contains("换气 高"), "The tile shows the ventilation level")
 print("Native bath heater ventilation passed")
 
 // Range hood: power is the main switch; turning off also switches its light off.

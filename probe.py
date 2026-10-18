@@ -103,9 +103,14 @@ CONTROL_ADDRESSES = (
     "ptc-bath-heater.mode", "ptc-bath-heater.ventilation", "ptc-bath-heater.target-temperature",
 )
 # Bump when the property whitelist changes so saved reports rediscover accessories once.
-ACCESSORY_SCHEMA = 3
+ACCESSORY_SCHEMA = 4
 # Extra controls only for particular device kinds (other kinds may share the service name).
-KIND_ADDRESSES = {"hood": ("hood.on", "fan-control.fan-level")}
+# (insert after, address): None puts the control first.
+KIND_ADDRESSES = {
+    "hood": ((None, "hood.on"), (None, "fan-control.fan-level")),
+    # The bath heater has two fan-level properties: #1 blowing, #2 ventilation.
+    "bath-heater": (("ptc-bath-heater.ventilation", "fan-control.fan-level#2"),),
+}
 READING_ADDRESSES = (
     "curtain.current-position", "power-consumption.electric-power",
     "environment.pm2.5-density", "environment.temperature", "environment.relative-humidity",
@@ -115,8 +120,10 @@ READING_ADDRESSES = (
 def accessory_props(spec, kind=None):
     """Only the whitelisted properties, with the metadata the panel needs to render them."""
     props = []
-    extra = KIND_ADDRESSES.get(kind or XiaomiCloud.kind(spec.get("type")), ())
-    controls = extra + CONTROL_ADDRESSES
+    controls = list(CONTROL_ADDRESSES)
+    for after, address in reversed(KIND_ADDRESSES.get(kind or XiaomiCloud.kind(spec.get("type")), ())):
+        controls.insert(controls.index(after) + 1 if after in controls else 0, address)
+    controls = tuple(controls)
     for address in controls + READING_ADDRESSES:
         service, prop = XiaomiCloud.find_property(spec, address)
         if not prop:
