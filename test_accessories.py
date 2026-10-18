@@ -109,5 +109,21 @@ class AccessoryTests(unittest.TestCase):
         self.assertTrue(props["ptc-bath-heater.ventilation"]["writable"])
 
 
+    def test_hood_gets_power_fan_and_light_but_bath_heaters_do_not_get_fan_level(self):
+        fan = {"iid": 3, "type": "urn:miot-spec-v2:service:fan-control:1", "properties": [
+            {"iid": 1, "type": "urn:miot-spec-v2:property:fan-level:1", "format": "uint8", "access": ["read", "write"],
+             "value-list": [{"value": 1, "description": "Low"}, {"value": 4, "description": "Turbo"}]}]}
+        light = {"iid": 6, "type": "urn:miot-spec-v2:service:light:1", "properties": [
+            {"iid": 1, "type": "urn:miot-spec-v2:property:on:1", "format": "bool", "access": ["read", "write"]}]}
+        hood = {"type": "urn:miot-spec-v2:device:hood:1", "services": [
+            {"iid": 2, "type": "urn:miot-spec-v2:service:hood:1", "properties": [
+                {"iid": 1, "type": "urn:miot-spec-v2:property:on:1", "format": "bool", "access": ["read", "write"]}]},
+            fan, light]}
+        props = {p["address"]: p for p in probe.accessory_props(hood)}
+        self.assertTrue(all(props[a]["writable"] for a in ("hood.on", "fan-control.fan-level", "light.on")))
+        heater = {"type": "urn:miot-spec-v2:device:bath-heater:1", "services": [fan, light]}
+        self.assertNotIn("fan-control.fan-level", {p["address"] for p in probe.accessory_props(heater)})
+
+
 if __name__ == "__main__":
     unittest.main()

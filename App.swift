@@ -62,7 +62,8 @@ struct Accessory: Identifiable {
     let props: [AccessoryProp]
     var values: [String: AnyHashable]
 
-    static let primaryAddress = ["light": "light.on", "outlet": "switch.on", "fan": "fan.on", "air-purifier": "air-purifier.on"]
+    static let primaryAddress = ["light": "light.on", "outlet": "switch.on", "fan": "fan.on", "air-purifier": "air-purifier.on",
+                                 "hood": "hood.on"]
     var primary: String? { Self.primaryAddress[kind].flatMap { address in props.contains { $0.address == address } ? address : nil } }
     var isOn: Bool? {
         if let primary = primary { return values[primary]?.base as? Bool }
@@ -183,7 +184,7 @@ final class AppModel: ObservableObject {
     // The air conditioner card shows only when the selected room has one.
     var areaRoom: RoomReading? { rooms.first { $0.area == area }.map(overlaid) }
 
-    static let kindOrder = ["light", "curtain", "bath-heater", "air-purifier", "fan", "outlet"]
+    static let kindOrder = ["light", "curtain", "bath-heater", "hood", "air-purifier", "fan", "outlet"]
     var areaAccessories: [Accessory] {
         accessories.filter { $0.room == area }.map(overlaid).sorted {
             if $0.group != $1.group { return $0.group }
@@ -347,7 +348,7 @@ final class AppModel: ObservableObject {
                    "auto": "自动", "sleep": "睡眠", "strong": "强力", "none": "手动", "low": "低", "medium": "中",
                    "high": "高", "quiet": "静音", "straight wind": "直吹风", "natural wind": "自然风",
                    "level1": "1 档", "level2": "2 档", "level3": "3 档", "level4": "4 档",
-                   "open": "打开", "close": "关闭", "pause": "暂停"]
+                   "open": "打开", "close": "关闭", "pause": "暂停", "turbo": "爆炒"]
         return map[text.lowercased()] ?? text
     }
 
@@ -741,7 +742,7 @@ final class AppModel: ObservableObject {
         guard item.online else { return [:] }
         var changes: [String: AnyHashable] = [:]
         if includeOutlet, item.kind == "outlet", item.values["switch.on"]?.base as? Bool == true { return ["switch.on": false] }
-        for address in ["light.on", "fan.on", "air-purifier.on"] where item.prop(address)?.writable == true {
+        for address in ["hood.on", "light.on", "fan.on", "air-purifier.on"] where item.prop(address)?.writable == true {
             if item.values[address]?.base as? Bool == true { changes[address] = false }
         }
         if item.prop("ptc-bath-heater.mode")?.writable == true, let mode = item.number("ptc-bath-heater.mode"), mode != 0 {
@@ -819,7 +820,7 @@ final class AppModel: ObservableObject {
     // MARK: Sleep timers
 
     static func timerEligible(_ item: Accessory) -> Bool {
-        item.kind != "curtain" && ["light.on", "fan.on", "air-purifier.on", "switch.on", "ptc-bath-heater.mode"]
+        item.kind != "curtain" && ["hood.on", "light.on", "fan.on", "air-purifier.on", "switch.on", "ptc-bath-heater.mode"]
             .contains { item.prop($0)?.writable == true }
     }
 
@@ -1667,17 +1668,22 @@ struct AccessoryDetail: View {
         case "outlet": return symbol("powerplug", fallback: "bolt")
         case "fan": return symbol("fan", fallback: "wind")
         case "air-purifier": return symbol("air.purifier", fallback: "aqi.medium")
+        case "hood": return symbol("wind", fallback: "fan")
         default: return symbol("heater.vertical", fallback: "flame")
         }
     }
 
-    func label(_ prop: AccessoryProp) -> String { Self.label(prop) }
+    func label(_ prop: AccessoryProp) -> String {
+        // The range hood's purifier service is its smoke purification, not a second power switch.
+        if item.kind == "hood" && prop.address == "air-purifier.on" { return "净化" }
+        return Self.label(prop)
+    }
     static func label(_ prop: AccessoryProp) -> String {
         let (service, field) = { () -> (String, String) in
             let parts = prop.address.split(separator: ".", maxSplits: 1).map(String.init)
             return (parts[0], parts.count > 1 ? parts[1] : "")
         }()
-        if field == "on" { return ["light": "照明", "fan": "风扇", "switch": "电源", "air-purifier": "电源"][service] ?? "开关" }
+        if field == "on" { return ["light": "照明", "fan": "风扇", "switch": "电源", "air-purifier": "电源", "hood": "电源"][service] ?? "开关" }
         return ["brightness": "亮度", "color-temperature": "色温", "target-position": "开合", "fan-level": "风速",
                 "mode": "模式", "ventilation": "换气", "horizontal-swing": "摇头", "target-temperature": "目标温度", "motor-control": "窗帘"][field] ?? field
     }
@@ -1710,6 +1716,13 @@ struct AccessoryDetail: View {
         case "air-purifier":
             let pm = item.number("environment.pm2.5-density").map { "PM2.5 \(Int($0))" }
             return [item.isOn == true ? option(item, "air-purifier.mode") ?? "已开启" : "已关闭", pm].compactMap { $0 }.joined(separator: " · ")
+        case "hood":
+            let pm = item.number("environment.pm2.5-density").map { "PM2.5 \(Int($0))" }
+            guard item.isOn == true else {
+                return [item.values["light.on"]?.base as? Bool == true ? "照明开" : "已关闭", pm].compactMap { $0 }.joined(separator: " · ")
+            }
+            let light = item.values["light.on"]?.base as? Bool == true ? "照明开" : nil
+            return [option(item, "fan-control.fan-level").map { "风速 " + $0 } ?? "运行中", light, pm].compactMap { $0 }.joined(separator: " · ")
         case "fan":
             guard item.isOn == true else { return "已关闭" }
             return [option(item, "fan.mode"), option(item, "fan.fan-level"), item.values["fan.horizontal-swing"]?.base as? Bool == true ? "摇头" : nil]

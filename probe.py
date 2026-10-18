@@ -93,7 +93,7 @@ def read_climate(cloud, report):
 
 # Accessory kinds offered in the panel and the property addresses each may expose.
 # Wall switches are deliberately excluded: they can cut power to smart lights.
-ACCESSORY_KINDS = ("light", "curtain", "outlet", "fan", "air-purifier", "bath-heater")
+ACCESSORY_KINDS = ("light", "curtain", "outlet", "fan", "air-purifier", "bath-heater", "hood")
 CONTROL_ADDRESSES = (
     "light.on", "light.brightness", "light.color-temperature",
     "switch.on",
@@ -103,28 +103,32 @@ CONTROL_ADDRESSES = (
     "ptc-bath-heater.mode", "ptc-bath-heater.ventilation", "ptc-bath-heater.target-temperature",
 )
 # Bump when the property whitelist changes so saved reports rediscover accessories once.
-ACCESSORY_SCHEMA = 2
+ACCESSORY_SCHEMA = 3
+# Extra controls only for particular device kinds (other kinds may share the service name).
+KIND_ADDRESSES = {"hood": ("hood.on", "fan-control.fan-level")}
 READING_ADDRESSES = (
     "curtain.current-position", "power-consumption.electric-power",
     "environment.pm2.5-density", "environment.temperature", "environment.relative-humidity",
 )
 
 
-def accessory_props(spec):
+def accessory_props(spec, kind=None):
     """Only the whitelisted properties, with the metadata the panel needs to render them."""
     props = []
-    for address in CONTROL_ADDRESSES + READING_ADDRESSES:
+    extra = KIND_ADDRESSES.get(kind or XiaomiCloud.kind(spec.get("type")), ())
+    controls = extra + CONTROL_ADDRESSES
+    for address in controls + READING_ADDRESSES:
         service, prop = XiaomiCloud.find_property(spec, address)
         if not prop:
             continue
         access = prop.get("access", [])
-        if address in CONTROL_ADDRESSES and "write" not in access:
+        if address in controls and "write" not in access:
             continue
         if address in READING_ADDRESSES and "read" not in access:
             continue
         entry = {"address": address, "siid": service["iid"], "piid": prop["iid"],
                  "format": prop.get("format"), "readable": "read" in access,
-                 "writable": address in CONTROL_ADDRESSES}
+                 "writable": address in controls}
         if prop.get("value-range"):
             entry["range"] = prop["value-range"]
         if prop.get("value-list"):

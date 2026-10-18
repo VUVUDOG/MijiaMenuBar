@@ -514,6 +514,23 @@ expect(AccessoryDetail.controls(ventilating).contains { $0.address == "ptc-bath-
 expect(AccessoryDetail.summary(ventilating).contains("换气"), "The tile shows ventilation")
 print("Native bath heater ventilation passed")
 
+// Range hood: power is the main switch; turning off also switches its light off.
+let hood = AppModel.accessory(["device": ["did": "hood", "name": "净烟机", "isOnline": true], "room": "厨房",
+    "kind": "hood", "group": false, "props": [
+        ["address": "hood.on", "format": "bool", "readable": true, "writable": true],
+        ["address": "fan-control.fan-level", "format": "uint8", "readable": true, "writable": true,
+         "options": [["value": 1, "description": "Low"], ["value": 4, "description": "Turbo"]]],
+        ["address": "light.on", "format": "bool", "readable": true, "writable": true]],
+    "state": ["hood.on": true, "fan-control.fan-level": 4, "light.on": true]])!
+expect(hood.primary == "hood.on" && hood.isOn == true, "The hood switches on its own power")
+expect(timed.offChanges(hood) == ["hood.on": AnyHashable(false), "light.on": AnyHashable(false)], "Turning off stops the hood and its light")
+expect(AccessoryDetail.summary(hood).contains("风速 爆炒") && AppModel.timerEligible(hood), "Hood summary and timer")
+let hoodPurifier = AppModel.accessory(["device": ["did": "hood2", "name": "净烟机", "isOnline": true], "room": "厨房",
+    "kind": "hood", "group": false, "props": [["address": "hood.on", "format": "bool", "readable": true, "writable": true],
+        ["address": "air-purifier.on", "format": "bool", "readable": true, "writable": true]], "state": [:]])!
+expect(AccessoryDetail(item: hoodPurifier, model: timed).label(hoodPurifier.prop("air-purifier.on")!) == "净化", "Hood purification label")
+print("Native range hood passed")
+
 // Appearance: follow macOS by default; light / dark persist and apply app-wide.
 UserDefaults.standard.removeObject(forKey: "appearance")
 let preferences = Preferences()
