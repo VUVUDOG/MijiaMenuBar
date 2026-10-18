@@ -98,5 +98,16 @@ class AccessoryTests(unittest.TestCase):
                          {"submersion-sensor.submersion-state", "battery.battery-level"})
 
 
+    def test_bath_heater_exposes_ventilation(self):
+        heater = {"type": "urn:miot-spec-v2:device:bath-heater:1", "services": [
+            {"iid": 4, "type": "urn:miot-spec-v2:service:ptc-bath-heater:1", "properties": [
+                {"iid": 8, "type": "urn:miot-spec-v2:property:ventilation:1", "format": "bool", "access": ["read", "write"]},
+                {"iid": 17, "type": "urn:miot-spec-v2:property:mode:1", "format": "uint8", "access": ["read", "write"],
+                 "value-list": [{"value": 0, "description": "Idle"}, {"value": 2, "description": "Heat"}]}]}]}
+        props = {p["address"]: p for p in probe.accessory_props(heater)}
+        self.assertIn("ptc-bath-heater.ventilation", props)
+        self.assertTrue(props["ptc-bath-heater.ventilation"]["writable"])
+
+
 if __name__ == "__main__":
     unittest.main()

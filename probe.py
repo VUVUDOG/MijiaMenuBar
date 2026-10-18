@@ -100,8 +100,10 @@ CONTROL_ADDRESSES = (
     "fan.on", "fan.mode", "fan.fan-level", "fan.horizontal-swing",
     "air-purifier.on", "air-purifier.mode", "air-purifier.fan-level",
     "curtain.motor-control", "curtain.target-position",
-    "ptc-bath-heater.mode", "ptc-bath-heater.target-temperature",
+    "ptc-bath-heater.mode", "ptc-bath-heater.ventilation", "ptc-bath-heater.target-temperature",
 )
+# Bump when the property whitelist changes so saved reports rediscover accessories once.
+ACCESSORY_SCHEMA = 2
 READING_ADDRESSES = (
     "curtain.current-position", "power-consumption.electric-power",
     "environment.pm2.5-density", "environment.temperature", "environment.relative-humidity",
@@ -302,7 +304,8 @@ def main(argv=None):
             if not (RUNTIME / "report.json").exists():
                 raise CloudError("请先同步空调设备")
             report = json.loads((RUNTIME / "report.json").read_text())
-            if "sensors" not in report or "accessories" not in report or "alarms" not in report:
+            if ("sensors" not in report or "accessories" not in report or "alarms" not in report
+                    or report.get("accessory_schema") != ACCESSORY_SCHEMA):
                 # Reports from older versions: discover rooms, sensors and accessories once.
                 # A failed lookup must not block the air-conditioner refresh; retry next time.
                 try:
@@ -314,6 +317,7 @@ def main(argv=None):
                     report["accessories"] = discover_accessories(cloud, devices, report["home"])
                     report["alarms"] = discover_alarms(cloud, devices, report["home"])
                     read_accessories(cloud, report["accessories"] + report["alarms"])
+                    report["accessory_schema"] = ACCESSORY_SCHEMA
                 except (CloudError, requests.RequestException, ValueError, KeyError):
                     pass
             targets = report["devices"]
@@ -399,7 +403,8 @@ def main(argv=None):
         alarms = discover_alarms(cloud, devices, home)
         read_accessories(cloud, accessories + alarms)
         full = {"devices": reports, "sensors": discover_sensors(cloud, devices), "home": home,
-                "accessories": accessories, "alarms": alarms, "total_device_count": len(devices), "read_at": time.time()}
+                "accessories": accessories, "alarms": alarms, "accessory_schema": ACCESSORY_SCHEMA,
+                "total_device_count": len(devices), "read_at": time.time()}
         read_climate(cloud, full)
         write_json("report.json", full)
         if not summaries:

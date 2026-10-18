@@ -66,7 +66,11 @@ struct Accessory: Identifiable {
     var primary: String? { Self.primaryAddress[kind].flatMap { address in props.contains { $0.address == address } ? address : nil } }
     var isOn: Bool? {
         if let primary = primary { return values[primary]?.base as? Bool }
-        if kind == "bath-heater" { return (values["ptc-bath-heater.mode"]?.base as? Double).map { $0 != 0 } }
+        if kind == "bath-heater" {
+            let mode = (values["ptc-bath-heater.mode"]?.base as? Double).map { $0 != 0 }
+            let vent = values["ptc-bath-heater.ventilation"]?.base as? Bool
+            return mode == nil && vent == nil ? nil : (mode ?? false) || (vent ?? false)
+        }
         if kind == "curtain" { return (values["curtain.current-position"]?.base as? Double).map { $0 > 0 } }
         return nil
     }
@@ -742,6 +746,9 @@ final class AppModel: ObservableObject {
         }
         if item.prop("ptc-bath-heater.mode")?.writable == true, let mode = item.number("ptc-bath-heater.mode"), mode != 0 {
             changes["ptc-bath-heater.mode"] = 0.0
+        }
+        if item.prop("ptc-bath-heater.ventilation")?.writable == true, item.values["ptc-bath-heater.ventilation"]?.base as? Bool == true {
+            changes["ptc-bath-heater.ventilation"] = false
         }
         return item.kind == "outlet" || item.kind == "curtain" ? [:] : changes
     }
@@ -1672,7 +1679,7 @@ struct AccessoryDetail: View {
         }()
         if field == "on" { return ["light": "照明", "fan": "风扇", "switch": "电源", "air-purifier": "电源"][service] ?? "开关" }
         return ["brightness": "亮度", "color-temperature": "色温", "target-position": "开合", "fan-level": "风速",
-                "mode": "模式", "horizontal-swing": "摇头", "target-temperature": "目标温度", "motor-control": "窗帘"][field] ?? field
+                "mode": "模式", "ventilation": "换气", "horizontal-swing": "摇头", "target-temperature": "目标温度", "motor-control": "窗帘"][field] ?? field
     }
 
     func formatted(_ prop: AccessoryProp, _ value: Double) -> String {
@@ -1710,7 +1717,8 @@ struct AccessoryDetail: View {
         default:
             let light = item.values["light.on"]?.base as? Bool == true ? "照明开" : nil
             let temp = item.number("environment.temperature").map { String(format: "%.0f°", $0) }
-            return [option(item, "ptc-bath-heater.mode") ?? "—", light, temp].compactMap { $0 }.joined(separator: " · ")
+            let vent = item.values["ptc-bath-heater.ventilation"]?.base as? Bool == true ? "换气" : nil
+            return [option(item, "ptc-bath-heater.mode") ?? "—", vent, light, temp].compactMap { $0 }.joined(separator: " · ")
         }
     }
 

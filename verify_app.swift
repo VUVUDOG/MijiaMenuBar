@@ -500,6 +500,20 @@ expect(timed.timers.isEmpty, "Timers can be cancelled")
 UserDefaults.standard.removeObject(forKey: "timers")
 print("Native sleep timers: eligibility, persistence, firing, stale drop, outlets and cancel passed")
 
+// Bath heater ventilation counts as running and is switched off with everything else.
+let ventilating = AppModel.accessory(["device": ["did": "bath", "name": "浴霸", "isOnline": true], "room": "卫生间",
+    "kind": "bath-heater", "group": false, "props": [
+        ["address": "ptc-bath-heater.mode", "format": "uint8", "readable": true, "writable": true,
+         "options": [["value": 0, "description": "Idle"], ["value": 2, "description": "Heat"]]],
+        ["address": "ptc-bath-heater.ventilation", "format": "bool", "readable": true, "writable": true]],
+    "state": ["ptc-bath-heater.mode": 0, "ptc-bath-heater.ventilation": true]])!
+expect(ventilating.isOn == true, "Ventilation alone means the bath heater is running")
+expect(timed.offChanges(ventilating) == ["ptc-bath-heater.ventilation": AnyHashable(false)], "Turning off stops ventilation")
+expect(AccessoryDetail.controls(ventilating).contains { $0.address == "ptc-bath-heater.ventilation" && $0.isBool },
+    "Ventilation is offered as a switch")
+expect(AccessoryDetail.summary(ventilating).contains("换气"), "The tile shows ventilation")
+print("Native bath heater ventilation passed")
+
 // Appearance: follow macOS by default; light / dark persist and apply app-wide.
 UserDefaults.standard.removeObject(forKey: "appearance")
 let preferences = Preferences()
