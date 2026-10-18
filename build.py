@@ -1,3 +1,4 @@
+import json
 import plistlib
 import argparse
 import platform
@@ -33,13 +34,39 @@ if args.worker or not (worker / "CloudWorker").exists():
     shutil.copytree(output / "worker" / "CloudWorker", worker, symlinks=True)
 info = {"CFBundleIdentifier": "local.hitachi.menubar", "CFBundleName": "米家菜单栏", "CFBundleDisplayName": "米家菜单栏",
         "CFBundleExecutable": "MijiaMenuBar", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "0.6.3", "CFBundleVersion": "22",
+        "CFBundleShortVersionString": "0.7.0", "CFBundleVersion": "23",
         "LSUIElement": True, "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "13.0"}
 with (bundle / "Contents" / "Info.plist").open("wb") as output:
     plistlib.dump(info, output)
-subprocess.run(["swiftc", str(root / "App.swift"), "-o", str(macos / "MijiaMenuBar"),
-                "-target", args.arch + "-apple-macos13.0", "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "Security"], check=True)
+# Compile the app, then generate the App Intents metadata (Shortcuts actions) the way
+# Xcode does: the compiler records constant values, the metadata processor turns them
+# into Contents/Resources/Metadata.appintents.
+sources = [root / "App.swift", root / "Intents.swift", root / "main.swift"]
+intents = work / "intents"
+shutil.rmtree(intents, ignore_errors=True)
+intents.mkdir(parents=True)
+triple = args.arch + "-apple-macos13.0"
+(intents / "protocols.json").write_text(json.dumps([
+    "AppIntent", "EntityQuery", "AppEntity", "TransientEntity", "AppEnum", "AppShortcutProviding",
+    "AppShortcutsProvider", "AnyResolverProviding", "AppIntentsPackage", "DynamicOptionsProvider"]))
+constvalues = intents / "MijiaMenuBar.swiftconstvalues"
+subprocess.run(["swiftc", *map(str, sources), "-o", str(macos / "MijiaMenuBar"), "-module-name", "MijiaMenuBar",
+                "-wmo", "-emit-const-values-path", str(constvalues),
+                "-Xfrontend", "-const-gather-protocols-file", "-Xfrontend", str(intents / "protocols.json"),
+                "-target", triple, "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "Security",
+                "-framework", "AppIntents"], check=True)
+(intents / "sources.txt").write_text("\n".join(map(str, sources)) + "\n")
+(intents / "constvalues.txt").write_text(str(constvalues) + "\n")
+developer = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True, check=True).stdout.strip()
+xcode_build = subprocess.run(["xcodebuild", "-version"], capture_output=True, text=True, check=True).stdout.split()[-1]
+sdk = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True, check=True).stdout.strip()
+subprocess.run(["xcrun", "appintentsmetadataprocessor", "--output", str(resources),
+                "--toolchain-dir", developer + "/Toolchains/XcodeDefault.xctoolchain", "--module-name", "MijiaMenuBar",
+                "--sdk-root", sdk, "--xcode-version", xcode_build, "--platform-family", "macOS",
+                "--deployment-target", "13.0", "--target-triple", triple,
+                "--source-file-list", str(intents / "sources.txt"), "--swift-const-vals-list", str(intents / "constvalues.txt"),
+                "--no-app-shortcuts-localization", "--force"], check=True)
 # PyInstaller otherwise derives a fresh identifier from each executable UUID.
 # Keep the helper identity predictable; ad-hoc code changes still need Keychain
 # authorization after an update (this does not weaken the stored item's ACL).

@@ -75,6 +75,8 @@ struct Accessory: Identifiable {
 }
 
 final class AppModel: ObservableObject {
+    // The running app's model, used by Shortcuts actions.
+    static var shared: AppModel?
     @Published var phase = "idle"
     @Published var message = "请先扫码登录米家"
     @Published var qr: NSImage?
@@ -609,7 +611,13 @@ final class AppModel: ObservableObject {
     // Record the intent immediately; repeated taps replace the queued value
     // instead of being dropped while an earlier command is still running.
     func set(_ field: String, value: AnyHashable, delay: TimeInterval = 0.05) {
-        guard let room = selected, room.writable.contains(field) else { return }
+        guard let room = selected else { return }
+        setClimate(room.id, field, value: value, delay: delay)
+    }
+
+    // Any air conditioner by id (the panel uses the selected one; Shortcuts may name another).
+    func setClimate(_ id: String, _ field: String, value: AnyHashable, delay: TimeInterval = 0.05) {
+        guard let room = rooms.first(where: { $0.id == id }), room.writable.contains(field) else { return }
         var changes = pending[room.id] ?? [:]
         let reported = rooms.first { $0.id == room.id }.map(reportedValue(field)) ?? nil
         if inFlight?[room.id]?[field] == nil, reported == value {
@@ -1869,6 +1877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Preferences.shared.apply()
         }
         model = AppModel(worker: resources.appendingPathComponent("CloudWorker/CloudWorker"))
+        AppModel.shared = model
         showObserver = DistributedNotificationCenter.default().addObserver(forName: Notification.Name("local.hitachi.menubar.show"), object: nil, queue: .main) { [weak self] _ in
             guard let self = self, self.panel != nil, !self.panel.isVisible else { return }
             self.toggle()
@@ -1983,9 +1992,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         applicationLease = nil
     }
 }
-
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)
-app.run()
