@@ -289,6 +289,8 @@ try saveFixture("report.json", ["devices": [["device": ["did": "test-room", "nam
         ["device": ["did": "c1", "name": "走廊窗帘", "isOnline": true], "room": "走廊", "kind": "curtain", "group": false,
          "props": curtainProps, "state": ["curtain.current-position": 30]]]], runtime: accessoryRuntime)
 UserDefaults.standard.removeObject(forKey: "selectedArea")
+UserDefaults.standard.removeObject(forKey: "deviceOrder")
+UserDefaults.standard.removeObject(forKey: "favorites")
 let home = AppModel(worker: URL(fileURLWithPath: CommandLine.arguments[2]), runtime: accessoryRuntime,
     credentialReader: { _ in (errSecSuccess, testSessionData) })
 expect(home.areas == ["主卧", "厨房", "走廊"], "Rooms with air conditioners come first, then rooms by device count")
@@ -530,6 +532,32 @@ let hoodPurifier = AppModel.accessory(["device": ["did": "hood2", "name": "净�
         ["address": "air-purifier.on", "format": "bool", "readable": true, "writable": true]], "state": [:]])!
 expect(AccessoryDetail(item: hoodPurifier, model: timed).label(hoodPurifier.prop("air-purifier.on")!) == "净化", "Hood purification label")
 print("Native range hood passed")
+
+// Dragging tiles: per-room order persists, new devices go last, favourites reorder, reset.
+UserDefaults.standard.removeObject(forKey: "deviceOrder")
+UserDefaults.standard.removeObject(forKey: "favorites")
+home.deviceOrder = [:]; home.favorites = []
+home.selectArea("主卧")
+let defaultIDs = home.areaAccessories.map(\.id)
+expect(defaultIDs == ["group", "lamp"], "Default order before dragging: \(defaultIDs)")
+home.move("lamp", onto: "group", favorites: false)
+expect(home.areaAccessories.map(\.id) == ["lamp", "group"], "Dragging moves the tile")
+expect((UserDefaults.standard.dictionary(forKey: "deviceOrder") as? [String: [String]])?["主卧"] == ["lamp", "group"], "Order persists")
+home.deviceOrder["主卧"] = ["lamp"]
+expect(home.areaAccessories.map(\.id) == ["lamp", "group"], "Devices missing from a saved order go to the end")
+home.selectArea("厨房")
+expect(home.deviceOrder["厨房"] == nil && home.areaAccessories.map(\.id) == home.defaultOrder(home.areaAccessories).map(\.id),
+    "Other rooms keep their own order")
+home.selectArea("主卧")
+home.resetOrder()
+expect(home.areaAccessories.map(\.id) == defaultIDs, "Reset restores the default order")
+home.toggleFavorite("c1"); home.toggleFavorite("lamp"); home.toggleFavorite("k1")
+home.move("k1", onto: "c1", favorites: true)
+expect(home.favorites == ["k1", "c1", "lamp"], "Favourites reorder by dragging")
+UserDefaults.standard.removeObject(forKey: "deviceOrder")
+UserDefaults.standard.removeObject(forKey: "favorites")
+home.favorites = []
+print("Native tile reordering passed")
 
 // Appearance: follow macOS by default; light / dark persist and apply app-wide.
 UserDefaults.standard.removeObject(forKey: "appearance")

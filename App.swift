@@ -5,6 +5,7 @@ import Security
 import CryptoKit
 import ServiceManagement
 import UserNotifications
+import UniformTypeIdentifiers
 
 // Hold this lease for the application's lifetime. Opening a second copy must
 // not create another independent Keychain authorization or refresh loop.
@@ -185,12 +186,44 @@ final class AppModel: ObservableObject {
     var areaRoom: RoomReading? { rooms.first { $0.area == area }.map(overlaid) }
 
     static let kindOrder = ["light", "curtain", "bath-heater", "hood", "air-purifier", "fan", "outlet"]
-    var areaAccessories: [Accessory] {
-        accessories.filter { $0.room == area }.map(overlaid).sorted {
+    // Rooms keep a custom tile order once the user drags tiles; new devices go to the end.
+    @Published var deviceOrder: [String: [String]] = UserDefaults.standard.dictionary(forKey: "deviceOrder") as? [String: [String]] ?? [:]
+
+    func defaultOrder(_ items: [Accessory]) -> [Accessory] {
+        items.sorted {
             if $0.group != $1.group { return $0.group }
             let a = Self.kindOrder.firstIndex(of: $0.kind) ?? 9, b = Self.kindOrder.firstIndex(of: $1.kind) ?? 9
             return a != b ? a < b : $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
+    }
+
+    var areaAccessories: [Accessory] {
+        let items = defaultOrder(accessories.filter { $0.room == area }.map(overlaid))
+        guard let order = deviceOrder[area] else { return items }
+        let rank = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($1, $0) })
+        let fallback = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($1.id, $0) })
+        return items.sorted { (rank[$0.id] ?? order.count + fallback[$0.id]!) < (rank[$1.id] ?? order.count + fallback[$1.id]!) }
+    }
+
+    // Move `id` to the position of `target` within the current room (or within favourites).
+    func move(_ id: String, onto target: String, favorites inFavorites: Bool) {
+        guard id != target else { return }
+        var ids = inFavorites ? favorites : areaAccessories.map(\.id)
+        guard let from = ids.firstIndex(of: id), let to = ids.firstIndex(of: target) else { return }
+        ids.remove(at: from)
+        ids.insert(id, at: to)
+        if inFavorites {
+            favorites = ids
+            UserDefaults.standard.set(favorites, forKey: "favorites")
+        } else {
+            deviceOrder[area] = ids
+            UserDefaults.standard.set(deviceOrder, forKey: "deviceOrder")
+        }
+    }
+
+    func resetOrder() {
+        deviceOrder[area] = nil
+        UserDefaults.standard.set(deviceOrder, forKey: "deviceOrder")
     }
     func areaActive(_ name: String) -> Bool {
         rooms.contains { $0.area == name && overlaid($0).power == true } ||
@@ -1134,6 +1167,7 @@ struct ControlView: View {
     @ObservedObject var updater = Updater.shared
     @ObservedObject var preferences = Preferences.shared
     @State private var detailID: String?
+    @State private var draggingID: String?
     @State private var climateExpanded = false
     @State private var confirmOffAll = false
     static let accent = Color.adaptive(light: NSColor(red: 0.04, green: 0.53, blue: 0.46, alpha: 1),
@@ -1394,6 +1428,13 @@ struct ControlView: View {
 
     // MARK: Devices — two-column tiles; click switches, the slider icon opens controls
 
+    // A cancelled drag sends no callback: clear the faded tile once the mouse is released.
+    func watchDragEnd() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            if NSEvent.pressedMouseButtons == 0 { draggingID = nil } else { watchDragEnd() }
+        }
+    }
+
     func tile(_ item: Accessory, favorites: Bool) -> some View {
         let on = item.isOn == true
         let hasControls = item.online && (!AccessoryDetail.controls(item).isEmpty || AppModel.timerEligible(item))
@@ -1430,7 +1471,16 @@ struct ControlView: View {
             .contextMenu {
                 Button(model.favorites.contains(item.id) ? "移出常用" : "加入常用") { model.toggleFavorite(item.id) }
                 if hasControls && !favorites { Button("调节…") { detailID = key } }
+                if !favorites && model.deviceOrder[model.area] != nil { Divider(); Button("恢复默认顺序") { model.resetOrder() } }
             }
+            // Press and drag a tile to move it; the others make room as it passes.
+            .opacity(draggingID == key ? 0.35 : 1)
+            .onDrag {
+                draggingID = key
+                watchDragEnd()
+                return NSItemProvider(object: key as NSString)
+            }
+            .onDrop(of: [.text], delegate: TileDrop(target: item.id, favorites: favorites, model: model, dragging: $draggingID))
     }
 
     func tileGrid(_ items: [Accessory], favorites: Bool) -> some View {
@@ -1606,6 +1656,26 @@ func symbol(_ name: String, fallback: String) -> String {
 }
 
 // "Switch off in 1 / 2 / 4 hours", or the countdown with a cancel button.
+// Reorders tiles live while one is dragged over another; keys of favourites carry a "fav-" prefix.
+struct TileDrop: DropDelegate {
+    let target: String
+    let favorites: Bool
+    let model: AppModel
+    @Binding var dragging: String?
+
+    var source: String? {
+        guard let key = dragging, key.hasPrefix("fav-") == favorites else { return nil }
+        return favorites ? String(key.dropFirst(4)) : key
+    }
+    func dropEntered(info: DropInfo) {
+        guard let id = source, id != target else { return }
+        withAnimation(.easeInOut(duration: 0.18)) { model.move(id, onto: target, favorites: favorites) }
+    }
+    func dropUpdated(info: DropInfo) -> DropProposal? { DropProposal(operation: .move) }
+    func validateDrop(info: DropInfo) -> Bool { source != nil }
+    func performDrop(info: DropInfo) -> Bool { dragging = nil; return true }
+}
+
 struct TimerRow: View {
     @ObservedObject var model: AppModel
     let id: String
