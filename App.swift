@@ -113,6 +113,9 @@ final class AppModel: ObservableObject {
     var expiryHandled = false
     @Published var expiredNotice = false
     @Published var favorites: [String] = UserDefaults.standard.stringArray(forKey: "favorites") ?? []
+    // Custom scenes (see Scenes.swift) and the outcome note shown once the queue drains.
+    @Published var scenes: [SceneDef] = AppModel.loadScenes()
+    var sceneNote: (name: String, done: Int, skipped: [String])?
     // Flood sensors: polled in the background, notify on change and every 30 minutes while wet.
     @Published var alarms: [Accessory] = []
     var alarmNotices: [String: Date] = [:]
@@ -807,6 +810,7 @@ final class AppModel: ObservableObject {
             }
             updateTitle()
         }
+        if sceneNote != nil, pending.isEmpty { finishScene(success: phase == "complete") }
         if !pending.isEmpty { scheduleFlush(after: 0.05) }
     }
 
@@ -1209,6 +1213,7 @@ struct ControlView: View {
     @ObservedObject var updater = Updater.shared
     @ObservedObject var preferences = Preferences.shared
     @State private var detailID: String?
+    @State private var sceneDraft: SceneDef?
     @State private var draggingID: String?
     @State private var climateExpanded = false
     @State private var confirmOffAll = false
@@ -1266,6 +1271,7 @@ struct ControlView: View {
                     .accessibilityLabel("全屋全关")
             }
             Menu {
+                Button("新建场景…") { sceneDraft = SceneDef.blank() }.disabled(!model.hasDevices)
                 Button("同步房间") { model.resync() }.disabled(model.busy || (!model.hasDevices && model.authState != "authenticated"))
                 Button(!model.hasDevices ? "扫码登录米家" : "重新登录米家") { model.login() }.disabled(model.controlling)
                 Divider()
@@ -1560,6 +1566,7 @@ struct ControlView: View {
     var middleCap: CGFloat {
         let screen = NSScreen.main?.visibleFrame.height ?? 900
         let top: CGFloat = 10 + 38 + Self.sectionSpacing + floodHeight + (favoritesHeight > 0 ? favoritesHeight + Self.sectionSpacing : 0)
+            + (model.scenes.isEmpty ? 0 : ScenesSection.height(model.scenes.count) + Self.sectionSpacing)
             + Self.roomRowsHeight(model.areas.count) + Self.sectionSpacing
         let bottom: CGFloat = Self.sectionSpacing + 1 + Self.sectionSpacing + 36 + 10
             + (updater.latest != nil || updater.note != nil ? 46 : 0)
@@ -1684,9 +1691,17 @@ struct ControlView: View {
             header
             if !model.wetAlarms.isEmpty { floodBanner }
             if model.hasDevices {
-                if !model.favoriteAccessories.isEmpty { favoritesSection }
-                roomTabs
-                if model.areaRoom != nil || !model.areaAccessories.isEmpty { middleSection }
+                if sceneDraft != nil {
+                    SceneEditor(model: model, draft: Binding(get: { sceneDraft ?? SceneDef.blank() }, set: { sceneDraft = $0 }),
+                                onClose: { sceneDraft = nil })
+                } else {
+                    if !model.favoriteAccessories.isEmpty { favoritesSection }
+                    if !model.scenes.isEmpty {
+                        ScenesSection(model: model, onEdit: { sceneDraft = $0 }, onNew: { sceneDraft = SceneDef.blank() })
+                    }
+                    roomTabs
+                    if model.areaRoom != nil || !model.areaAccessories.isEmpty { middleSection }
+                }
             } else { loginContent }
             if updater.latest != nil || updater.note != nil { updateBanner }
             Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 1)

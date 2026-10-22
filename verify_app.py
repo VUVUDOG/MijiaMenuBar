@@ -49,7 +49,7 @@ else:
 (runtime / "status.json").write_text(json.dumps(status))
 ''')
     worker.chmod(0o700)
-    subprocess.run(["swiftc", str(source), str(root / "Intents.swift"), "-module-name", "NativeTests",
+    subprocess.run(["swiftc", str(source), str(root / "Intents.swift"), str(root / "Scenes.swift"), "-module-name", "NativeTests",
                     "-o", str(executable), "-target", args.arch + "-apple-macos13.0", "-framework", "AppIntents",
                     "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "Security"], check=True)
     fixture = root / "docs" / "fixtures" / "accessories.json"

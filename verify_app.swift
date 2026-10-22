@@ -652,6 +652,71 @@ UserDefaults.standard.removeObject(forKey: "favorites")
 home.favorites = []
 print("Native tile reordering passed")
 
+// Scenes: record, save, persist, describe, run as one batch, skip what cannot run.
+UserDefaults.standard.removeObject(forKey: "scenes")
+home.scenes = []
+home.selectArea("主卧")
+let lampStep = home.captureStep("lamp"), groupStep = home.captureStep("group"), acStep = home.captureStep("test-room")
+let lampExpected: [String: SceneValue] = ["light.on": SceneValue.bool(false)]
+let groupExpected: [String: SceneValue] = ["light.on": SceneValue.bool(true), "light.brightness": SceneValue.number(80)]
+expect(lampStep?.values == lampExpected, "A light that is off is recorded as just off: \(String(describing: lampStep))")
+expect(groupStep?.values == groupExpected, "A light that is on keeps its settings")
+let acValues: [String: SceneValue] = acStep?.values ?? [:]
+let acPower: Bool = acValues["on"]?.boolValue ?? false
+let acTarget: Double = acValues["target-temperature"]?.numberValue ?? 0
+let acMode: Double = acValues["mode"]?.numberValue ?? 0
+expect(acPower && acTarget == 26 && acMode == 1, "An air conditioner records power, temperature and mode")
+expect(home.captureStep("c1")?.values.keys.contains("curtain.motor-control") != true, "Curtain actions are never recorded")
+expect(home.sceneDevices.allSatisfy { $0.id != "cook" }, "Cookers cannot be added to scenes")
+expect(home.stepOnKey("lamp") == "light.on" && home.stepOnKey("test-room") == "on" && home.stepOnKey("c1") == nil, "On keys")
+expect(home.describe(groupStep!) == "开 · 亮度 80%" && home.describe(acStep!).hasPrefix("开 · 26°"), "Steps read naturally: \(home.describe(groupStep!))")
+
+home.saveScene(SceneDef(id: "s0", name: "   ", steps: [groupStep!]))
+home.saveScene(SceneDef(id: "s0", name: "洗澡", steps: []))
+expect(home.scenes.isEmpty, "A scene needs a name and at least one device")
+let onValue: [String: SceneValue] = ["light.on": SceneValue.bool(true)]
+let offValue: [String: SceneValue] = ["light.on": SceneValue.bool(false)]
+let climateValue: [String: SceneValue] = ["on": SceneValue.bool(true), "target-temperature": SceneValue.number(28), "mode": SceneValue.number(2)]
+var bathSteps: [SceneStep] = []
+bathSteps.append(SceneStep(id: "lamp", values: onValue))
+bathSteps.append(SceneStep(id: "group", values: offValue))
+bathSteps.append(SceneStep(id: "test-room", values: climateValue))
+bathSteps.append(SceneStep(id: "k2", values: onValue))
+bathSteps.append(SceneStep(id: "gone", values: onValue))
+let bath = SceneDef(id: "s1", name: " 洗澡 ", steps: bathSteps)
+home.saveScene(bath)
+expect(home.scenes.map(\.name) == ["洗澡"] && AppModel.loadScenes().first?.steps.count == 5, "Scenes persist, with the name trimmed")
+home.saveScene(SceneDef(id: "s1", name: "洗澡", steps: [groupStep!]))
+expect(home.scenes.count == 1 && home.scenes[0].steps.count == 1, "Saving again replaces the scene")
+home.saveScene(bath)
+
+home.runScene(home.scenes[0])
+expect(home.areaAccessories.first { $0.id == "lamp" }?.isOn == true && home.areaAccessories.first { $0.id == "group" }?.isOn == false,
+    "A scene shows its result immediately")
+settleQueue(home)
+let sceneArgs = accessoryControls().last ?? []
+expect(sceneArgs.first == "--batch", "Every device goes out in one batch: \(sceneArgs.prefix(2))")
+let outcome = home.message
+expect(outcome.contains("场景「洗澡」已执行（3 个设备）"), "The footer reports the outcome: \(outcome)")
+expect(outcome.contains("离线") && outcome.contains("已不存在"), "Skipped devices are named: \(outcome)")
+home.deleteScene("s1")
+expect(home.scenes.isEmpty && AppModel.loadScenes().isEmpty, "Scenes can be deleted")
+
+// Layout: the scenes row and the editor report their real heights.
+home.scenes = (1...4).map { SceneDef(id: "x\($0)", name: "场景\($0)", steps: [groupStep!]) }
+let scenesView = NSHostingView(rootView: ScenesSection(model: home, onEdit: { _ in }, onNew: {}).frame(width: 344))
+expect(abs(scenesView.fittingSize.height - ScenesSection.height(4)) <= 1, "Scenes row: \(ScenesSection.height(4)) vs \(scenesView.fittingSize.height)")
+for count in [0, 3] {
+    var draft = SceneDef.blank()
+    for index in 0..<count { draft.steps.append(SceneStep(id: "g\(index)", values: groupExpected)) }
+    let editorView = NSHostingView(rootView: SceneEditorProbe(model: home, draft: draft).frame(width: 344))
+    let expected = SceneEditor.fixedHeight + min(SceneEditor.listHeight(count), 10_000)
+    expect(abs(editorView.fittingSize.height - expected) <= 1, "Editor with \(count) steps: \(expected) vs \(editorView.fittingSize.height)")
+}
+home.scenes = []
+UserDefaults.standard.removeObject(forKey: "scenes")
+print("Native scenes: record, save, persist, run as one batch, skip unavailable devices and layout passed")
+
 // Appearance: follow macOS by default; light / dark persist and apply app-wide.
 UserDefaults.standard.removeObject(forKey: "appearance")
 let preferences = Preferences()
@@ -697,4 +762,10 @@ struct GridProbe: View {
 struct RoomProbe: View {
     @ObservedObject var model: AppModel
     var body: some View { ControlView(model: model).roomTabs }
+}
+
+struct SceneEditorProbe: View {
+    @ObservedObject var model: AppModel
+    @State var draft: SceneDef
+    var body: some View { SceneEditor(model: model, draft: $draft, onClose: {}) }
 }

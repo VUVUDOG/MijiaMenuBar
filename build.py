@@ -34,7 +34,7 @@ if args.worker or not (worker / "CloudWorker").exists():
     shutil.copytree(output / "worker" / "CloudWorker", worker, symlinks=True)
 info = {"CFBundleIdentifier": "local.hitachi.menubar", "CFBundleName": "米家菜单栏", "CFBundleDisplayName": "米家菜单栏",
         "CFBundleExecutable": "MijiaMenuBar", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "0.7.7", "CFBundleVersion": "30",
+        "CFBundleShortVersionString": "0.8.0", "CFBundleVersion": "31",
         "LSUIElement": True, "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "13.0"}
 with (bundle / "Contents" / "Info.plist").open("wb") as output:
@@ -42,7 +42,7 @@ with (bundle / "Contents" / "Info.plist").open("wb") as output:
 # Compile the app, then generate the App Intents metadata (Shortcuts actions) the way
 # Xcode does: the compiler records constant values, the metadata processor turns them
 # into Contents/Resources/Metadata.appintents.
-sources = [root / "App.swift", root / "Intents.swift", root / "main.swift"]
+sources = [root / "App.swift", root / "Intents.swift", root / "Scenes.swift", root / "main.swift"]
 intents = work / "intents"
 shutil.rmtree(intents, ignore_errors=True)
 intents.mkdir(parents=True)
