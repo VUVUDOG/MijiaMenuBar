@@ -1,5 +1,6 @@
 import base64
 import unittest
+import requests
 from unittest.mock import patch
 
 from cloud import CloudError, XiaomiCloud, rc4
@@ -91,6 +92,20 @@ class CloudTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(len(sent[0]["params"]), 2)
         self.assertEqual(len(reads), 1)
+
+    def test_expired_token_is_reported_as_session_expired(self):
+        from unittest.mock import MagicMock
+        from cloud import SessionExpired
+        cloud = XiaomiCloud({"user_id": "u", "ssecurity": "c2VjdXJpdHk=", "service_token": "t"})
+        response = MagicMock(status_code=426, text='{"code":0,"message":"SERVICETOKEN_EXPIRED"}')
+        cloud.session.post = lambda *a, **k: response
+        with self.assertRaises(SessionExpired):
+            cloud._request("miotspec/prop/get", {"params": []})
+        response.status_code, response.text = 426, '{"code":0,"message":"other"}'
+        response.raise_for_status.side_effect = requests.HTTPError("426")
+        with self.assertRaises(requests.HTTPError):
+            cloud._request("miotspec/prop/get", {"params": []})
+
 
 if __name__ == "__main__":
     unittest.main()

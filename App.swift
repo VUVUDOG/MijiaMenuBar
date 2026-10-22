@@ -102,6 +102,10 @@ final class AppModel: ObservableObject {
     @Published var inFlight: [String: [String: AnyHashable]]?
     var failedIDs: Set<String>?
     var cancelledRefresh: Process?
+    // Called once when Xiaomi reports the login token as expired; the app opens the QR sign-in.
+    var onSessionExpired: (() -> Void)?
+    var expiryHandled = false
+    @Published var expiredNotice = false
     @Published var favorites: [String] = UserDefaults.standard.stringArray(forKey: "favorites") ?? []
     // Flood sensors: polled in the background, notify on change and every 30 minutes while wet.
     @Published var alarms: [Accessory] = []
@@ -290,6 +294,8 @@ final class AppModel: ObservableObject {
             phase = status["phase"] ?? "error"
             message = status["message"] ?? "未收到连接状态"
             automaticRefreshSuspended = status["reason"] == "keychain_access"
+            if status["reason"] == "session_expired" { sessionExpired() }
+            if status["phase"] == "complete" { expiryHandled = false; expiredNotice = false }
             failedIDs = status["failed"].map { Set($0.split(separator: ",").map(String.init)) }
             qr = active && phase == "awaiting_scan" ? NSImage(contentsOf: runtime.appendingPathComponent("login.png")) : nil
             if !active && ["starting", "authenticating", "reading", "awaiting_scan", "controlling"].contains(phase) {
@@ -383,6 +389,14 @@ final class AppModel: ObservableObject {
                    "level1": "1 档", "level2": "2 档", "level3": "3 档", "level4": "4 档",
                    "open": "打开", "close": "关闭", "pause": "暂停", "turbo": "爆炒"]
         return map[text.lowercased()] ?? text
+    }
+
+    func sessionExpired() {
+        guard !expiryHandled else { return }
+        expiryHandled = true
+        expiredNotice = true
+        recordDiagnostic("session_expired")
+        onSessionExpired?()
     }
 
     func updateTitle() {
@@ -1556,6 +1570,9 @@ struct ControlView: View {
         VStack(spacing: 16) {
             if let qr = model.qr {
                 VStack(spacing: 6) {
+                    if model.expiredNotice {
+                        Text("米家登录已过期，请重新扫码").font(.system(size: 12, weight: .medium)).foregroundStyle(.orange)
+                    }
                     Text("用米家 App 扫码登录").font(.system(size: 16, weight: .semibold))
                     Text("扫码后，在手机上确认登录").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
@@ -1981,6 +1998,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.target = self
         item.button?.action = #selector(toggle)
         model.titleChanged = { [weak self] title in self?.item.button?.title = title }
+        // Expired login: show the panel with a fresh QR code. Settings, favourites, order and
+        // timers live in preferences and are kept; the device list reloads after sign-in.
+        model.onSessionExpired = { [weak self] in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                self.model.login()
+                if !self.panel.isVisible { self.toggle() }
+            }
+        }
         panel = MenuPanel(contentRect: NSRect(x: 0, y: 0, width: 376, height: 100),
                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "米家"

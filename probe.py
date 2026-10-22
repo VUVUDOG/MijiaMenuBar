@@ -10,7 +10,7 @@ import requests
 from keyring.errors import KeyringError
 
 from auth import SessionStore, StaleSession
-from cloud import CloudError, XiaomiCloud
+from cloud import CloudError, SessionExpired, XiaomiCloud
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = Path(os.environ.get("HITACHI_RUNTIME_PATH", str(ROOT / ".runtime")))
@@ -237,6 +237,8 @@ def control_devices(cloud, report, commands):
                 client.set_properties(acs[did]["device"], acs[did]["spec"], changes)
             else:
                 raise CloudError("没有找到这个设备")
+        except SessionExpired:
+            raise
         except CloudError as exc:
             return did, str(exc)
         except requests.RequestException:
@@ -429,6 +431,9 @@ def main(argv=None):
         return 0
     except KeyringError:
         status("error", "钥匙串未授权，请允许访问后手动刷新，或重新扫码登录", reason="keychain_access")
+        return 1
+    except SessionExpired as exc:
+        status("error", str(exc), reason="session_expired")
         return 1
     except CloudError as exc:
         status("error", str(exc))

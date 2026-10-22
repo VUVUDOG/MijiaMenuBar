@@ -543,6 +543,17 @@ let hoodPurifier = AppModel.accessory(["device": ["did": "hood2", "name": "净�
 expect(AccessoryDetail(item: hoodPurifier, model: timed).label(hoodPurifier.prop("air-purifier.on")!) == "净化", "Hood purification label")
 print("Native range hood passed")
 
+// Expired login: handled once, shows the notice, clears after a successful sign-in.
+let expiredModel = AppModel(worker: fakeWorker, runtime: testRuntime.appendingPathComponent("expired-test"))
+var expiryCalls = 0
+expiredModel.onSessionExpired = { expiryCalls += 1 }
+expiredModel.sessionExpired(); expiredModel.sessionExpired()
+expect(expiryCalls == 1 && expiredModel.expiredNotice, "An expired login opens the sign-in once")
+try FileManager.default.createDirectory(at: testRuntime.appendingPathComponent("expired-test"), withIntermediateDirectories: true)
+expiredModel.expiryHandled = false; expiredModel.expiredNotice = false
+expiredModel.sessionExpired()
+expect(expiryCalls == 2, "A later expiry opens the sign-in again")
+
 // Dragging tiles: per-room order persists, new devices go last, favourites reorder, reset.
 UserDefaults.standard.removeObject(forKey: "deviceOrder")
 UserDefaults.standard.removeObject(forKey: "favorites")

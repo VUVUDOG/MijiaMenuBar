@@ -14,6 +14,11 @@ class CloudError(Exception):
     pass
 
 
+class SessionExpired(CloudError):
+    """The Mi Home login token was rejected (Xiaomi answers HTTP 426 / SERVICETOKEN_EXPIRED)."""
+    MESSAGE = "米家登录已过期，请重新扫码登录"
+
+
 def decode_account(text):
     return json.loads(text.removeprefix("&&&START&&&"))
 
@@ -285,6 +290,8 @@ class XiaomiCloud:
             cookies={"userId": cred["user_id"], "serviceToken": cred["service_token"],
                      "yetAnotherServiceToken": cred["service_token"], "locale": "zh_CN",
                      "timezone": "GMT+08:00", "channel": "MI_APP_STORE"})
+        if response.status_code in (401, 426) and "EXPIRED" in response.text.upper():
+            raise SessionExpired(SessionExpired.MESSAGE)
         response.raise_for_status()
         try:
             result = json.loads(response.text)
