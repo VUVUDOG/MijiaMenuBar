@@ -115,7 +115,7 @@ final class AppModel: ObservableObject {
     @Published var favorites: [String] = UserDefaults.standard.stringArray(forKey: "favorites") ?? []
     // Custom scenes (see Scenes.swift) and the outcome note shown once the queue drains.
     @Published var scenes: [SceneDef] = AppModel.loadScenes()
-    var sceneNote: (name: String, done: Int, skipped: [String])?
+    var sceneNote: (name: String, done: Int, skipped: [String], verb: String)?
     // Flood sensors: polled in the background, notify on change and every 30 minutes while wet.
     @Published var alarms: [Accessory] = []
     var alarmNotices: [String: Date] = [:]

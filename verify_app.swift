@@ -699,6 +699,21 @@ expect(sceneArgs.first == "--batch", "Every device goes out in one batch: \(scen
 let outcome = home.message
 expect(outcome.contains("场景「洗澡」已执行（3 个设备）"), "The footer reports the outcome: \(outcome)")
 expect(outcome.contains("离线") && outcome.contains("已不存在"), "Skipped devices are named: \(outcome)")
+// Toggle: first click starts the scene, the second click switches what it started off again.
+let toggleScene = SceneDef(id: "t1", name: "开灯", steps: [SceneStep(id: "lamp", values: onValue), SceneStep(id: "group", values: offValue)])
+expect(!home.isSceneActive(toggleScene), "A scene is not active while its lights are off")
+home.toggleScene(toggleScene)
+expect(home.isSceneActive(toggleScene), "Active as soon as the scene's lights show on")
+expect(home.closingChanges(toggleScene).keys.sorted() == ["lamp"] && home.closingChanges(toggleScene)["lamp"] == ["light.on": AnyHashable(false)],
+    "Closing only affects what the scene switched on")
+home.toggleScene(toggleScene)
+expect(!home.isSceneActive(toggleScene) && home.areaAccessories.first { $0.id == "lamp" }?.isOn == false, "A second click switches it off")
+settleQueue(home)
+home.toggleScene(toggleScene); home.toggleScene(toggleScene)
+expect(home.sceneNote?.verb == "已关闭" && home.sceneNote?.done == 1, "Closing is reported as closed: \(String(describing: home.sceneNote))")
+settleQueue(home)
+let offOnly = SceneDef(id: "t2", name: "全关", steps: [SceneStep(id: "lamp", values: offValue)])
+expect(!home.isSceneActive(offOnly), "A scene with nothing to switch on never toggles")
 home.deleteScene("s1")
 expect(home.scenes.isEmpty && AppModel.loadScenes().isEmpty, "Scenes can be deleted")
 

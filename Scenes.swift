@@ -175,7 +175,7 @@ extension AppModel {
                 skipped.append(label + "（已不存在）")
             }
         }
-        sceneNote = (scene.name, done, skipped)
+        sceneNote = (scene.name, done, skipped, "已执行")
         if pending.isEmpty && inFlight == nil {
             finishScene(success: true)
         } else {
@@ -183,12 +183,65 @@ extension AppModel {
         }
     }
 
+    // MARK: Toggle: a second click switches the scene off again
+
+    // What this scene switches on or starts, per device (only what is currently running).
+    func closingChanges(_ scene: SceneDef) -> [String: [String: AnyHashable]] {
+        var result: [String: [String: AnyHashable]] = [:]
+        for step in scene.steps {
+            var changes: [String: AnyHashable] = [:]
+            if let room = rooms.first(where: { $0.id == step.id }).map(overlaid) {
+                if step.values["on"]?.boolValue == true, room.power == true { changes["on"] = false }
+            } else if let item = accessories.first(where: { $0.id == step.id }).map(overlaid), item.online {
+                for (address, value) in step.values {
+                    if value.boolValue == true, item.values[address]?.base as? Bool == true { changes[address] = false }
+                    // A bath heater's heating / blowing mode returns to idle.
+                    if address == "ptc-bath-heater.mode", (value.numberValue ?? 0) != 0, (item.number(address) ?? 0) != 0 { changes[address] = 0.0 }
+                }
+            }
+            if !changes.isEmpty { result[step.id] = changes }
+        }
+        return result
+    }
+
+    // Active while everything the scene switches on is on. Scenes with nothing to switch on never toggle.
+    func isSceneActive(_ scene: SceneDef) -> Bool {
+        var hasOnStep = false
+        for step in scene.steps {
+            if let room = rooms.first(where: { $0.id == step.id }).map(overlaid) {
+                guard step.values["on"]?.boolValue == true else { continue }
+                hasOnStep = true
+                if room.power != true { return false }
+            } else if let item = accessories.first(where: { $0.id == step.id }).map(overlaid), item.online {
+                for (address, value) in step.values where value.boolValue == true && item.prop(address) != nil {
+                    hasOnStep = true
+                    if item.values[address]?.base as? Bool != true { return false }
+                }
+            }
+        }
+        return hasOnStep
+    }
+
+    func toggleScene(_ scene: SceneDef) {
+        guard isSceneActive(scene) else { runScene(scene); return }
+        let targets = closingChanges(scene)
+        for (id, changes) in targets {
+            if rooms.contains(where: { $0.id == id }) {
+                for (field, value) in changes { setClimate(id, field, value: value) }
+            } else {
+                for (address, value) in changes { setAccessory(id, address, value: value) }
+            }
+        }
+        sceneNote = (scene.name, targets.count, [], "已关闭")
+        if pending.isEmpty && inFlight == nil { finishScene(success: true) } else { message = "正在关闭场景「\(scene.name)」…" }
+    }
+
     // Called when the queue drains: report the outcome in the footer.
     func finishScene(success: Bool) {
         guard let note = sceneNote else { return }
         sceneNote = nil
         guard success else { return }
-        var text = "场景「\(note.name)」已执行（\(note.done) 个设备）"
+        var text = "场景「\(note.name)」\(note.verb)（\(note.done) 个设备）"
         if !note.skipped.isEmpty { text += "，已跳过：" + note.skipped.joined(separator: "、") }
         message = text
     }
@@ -217,14 +270,16 @@ struct ScenesSection: View {
             }.frame(height: 12)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
                 ForEach(model.scenes) { scene in
-                    Button { model.runScene(scene) } label: {
+                    let active = model.isSceneActive(scene)
+                    Button { model.toggleScene(scene) } label: {
                         HStack(spacing: 5) {
-                            Image(systemName: "play.fill").font(.system(size: 8))
+                            Image(systemName: active ? "stop.fill" : "play.fill").font(.system(size: 8))
                             Text(scene.name).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
-                        }.foregroundStyle(Color.primary.opacity(0.78)).frame(maxWidth: .infinity).frame(height: Self.chipHeight)
-                            .modifier(Surface(radius: 10))
+                        }.foregroundStyle(active ? ControlView.accent : Color.primary.opacity(0.78))
+                            .frame(maxWidth: .infinity).frame(height: Self.chipHeight)
+                            .modifier(Surface(selected: active, radius: 10))
                     }.buttonStyle(.plain)
-                        .help(scene.steps.map { (model.displayName($0.id) ?? "设备") + "：" + model.describe($0) }.joined(separator: "\n"))
+                        .help((active ? "再点一下关闭\n" : "") + scene.steps.map { (model.displayName($0.id) ?? "设备") + "：" + model.describe($0) }.joined(separator: "\n"))
                         .contextMenu {
                             Button("编辑…") { onEdit(scene) }
                             Button("删除") { model.deleteScene(scene.id) }
