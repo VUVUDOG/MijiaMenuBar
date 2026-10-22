@@ -74,6 +74,8 @@ struct Accessory: Identifiable {
             return mode == nil && vent == nil ? nil : (mode ?? false) || (vent ?? false)
         }
         if kind == "curtain" { return (values["curtain.current-position"]?.base as? Double).map { $0 > 0 } }
+        // Cooker: busy, delayed (reservation) or keeping warm counts as running.
+        if kind == "cooker" { return (values["cooker.status"]?.base as? Double).map { [2, 3, 4].contains(Int($0)) } }
         return nil
     }
     func prop(_ address: String) -> AccessoryProp? { props.first { $0.address == address } }
@@ -189,7 +191,7 @@ final class AppModel: ObservableObject {
     // The air conditioner card shows only when the selected room has one.
     var areaRoom: RoomReading? { rooms.first { $0.area == area }.map(overlaid) }
 
-    static let kindOrder = ["light", "curtain", "bath-heater", "hood", "air-purifier", "fan", "outlet"]
+    static let kindOrder = ["light", "curtain", "bath-heater", "hood", "air-purifier", "fan", "outlet", "cooker"]
     // Rooms keep a custom tile order once the user drags tiles; new devices go to the end.
     @Published var deviceOrder: [String: [String]] = UserDefaults.standard.dictionary(forKey: "deviceOrder") as? [String: [String]] ?? [:]
 
@@ -387,7 +389,11 @@ final class AppModel: ObservableObject {
                    "auto": "自动", "sleep": "睡眠", "strong": "强力", "none": "手动", "low": "低", "medium": "中",
                    "high": "高", "quiet": "静音", "straight wind": "直吹风", "natural wind": "自然风",
                    "level1": "1 档", "level2": "2 档", "level3": "3 档", "level4": "4 档",
-                   "open": "打开", "close": "关闭", "pause": "暂停", "turbo": "爆炒"]
+                   "open": "打开", "close": "关闭", "pause": "暂停", "turbo": "爆炒",
+                   "busy": "烹饪中", "delay": "预约中", "keep warm": "保温中", "error": "故障", "updating": "升级中",
+                   "cooking completed": "已完成", "fine cook": "精煮", "quick cook": "快煮", "cook congee": "煮粥",
+                   "rewarming": "热饭", "delicious soup": "煲汤", "multigrain rice": "杂粮饭", "optional": "自选",
+                   "grain congee": "杂粮粥"]
         return map[text.lowercased()] ?? text
     }
 
@@ -1756,6 +1762,7 @@ struct AccessoryDetail: View {
         case "fan": return symbol("fan", fallback: "wind")
         case "air-purifier": return symbol("air.purifier", fallback: "aqi.medium")
         case "hood": return symbol("wind", fallback: "fan")
+        case "cooker": return symbol("frying.pan", fallback: "flame")
         default: return symbol("heater.vertical", fallback: "flame")
         }
     }
@@ -1804,6 +1811,12 @@ struct AccessoryDetail: View {
         case "air-purifier":
             let pm = item.number("environment.pm2.5-density").map { "PM2.5 \(Int($0))" }
             return [item.isOn == true ? option(item, "air-purifier.mode") ?? "已开启" : "已关闭", pm].compactMap { $0 }.joined(separator: " · ")
+        case "cooker":
+            guard let status = option(item, "cooker.status") else { return "等待读取" }
+            let mode = item.isOn == true ? option(item, "cooker.cook-mode") : nil
+            let left = item.isOn == true && item.values["cooker.status"]?.base as? Double != 4
+                ? item.number("cooker.left-time").flatMap { $0 > 0 ? "剩余 \(Int($0)) 分钟" : nil } : nil
+            return [status, mode, left].compactMap { $0 }.joined(separator: " · ")
         case "hood":
             let pm = item.number("environment.pm2.5-density").map { "PM2.5 \(Int($0))" }
             guard item.isOn == true else {

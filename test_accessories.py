@@ -142,5 +142,22 @@ class AccessoryTests(unittest.TestCase):
         self.assertEqual(XiaomiCloud.find_property(heater, "fan-control.fan-level#3"), (None, None))
 
 
+    def test_cooker_is_read_only(self):
+        cooker = {"type": "urn:miot-spec-v2:device:cooker:1", "services": [
+            {"iid": 2, "type": "urn:miot-spec-v2:service:cooker:1", "properties": [
+                {"iid": 1, "type": "urn:miot-spec-v2:property:status:1", "format": "uint8", "access": ["read"],
+                 "value-list": [{"value": 1, "description": "Idle"}, {"value": 2, "description": "Busy"}]},
+                {"iid": 4, "type": "urn:miot-spec-v2:property:cook-mode:1", "format": "uint8", "access": ["read", "write"],
+                 "value-list": [{"value": 2, "description": "Cook Congee"}]},
+                {"iid": 7, "type": "urn:miot-spec-v2:property:left-time:1", "format": "uint16", "access": ["read"],
+                 "value-range": [0, 1440, 1]}]}]}
+        props = probe.accessory_props(cooker)
+        self.assertEqual([p["address"] for p in props], ["cooker.status", "cooker.cook-mode", "cooker.left-time"])
+        self.assertFalse(any(p["writable"] for p in props))
+        cloud = SimpleNamespace(spec=lambda model: cooker, device_homes={"a": "家"}, device_rooms={"a": "厨房"})
+        found = probe.discover_accessories(cloud, [{"did": "a", "model": "cooker"}], "家")
+        self.assertEqual([a["kind"] for a in found], ["cooker"])
+
+
 if __name__ == "__main__":
     unittest.main()

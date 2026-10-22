@@ -93,7 +93,10 @@ def read_climate(cloud, report):
 
 # Accessory kinds offered in the panel and the property addresses each may expose.
 # Wall switches are deliberately excluded: they can cut power to smart lights.
-ACCESSORY_KINDS = ("light", "curtain", "outlet", "fan", "air-purifier", "bath-heater", "hood")
+ACCESSORY_KINDS = ("light", "curtain", "outlet", "fan", "air-purifier", "bath-heater", "hood", "cooker")
+# Shown for their state only: no remote switching (a cooker must not be started unattended).
+READ_ONLY_KINDS = ("cooker",)
+KIND_READINGS = {"cooker": ("cooker.status", "cooker.cook-mode", "cooker.left-time", "cooker.fault")}
 CONTROL_ADDRESSES = (
     "light.on", "light.brightness", "light.color-temperature",
     "switch.on",
@@ -103,7 +106,7 @@ CONTROL_ADDRESSES = (
     "ptc-bath-heater.mode", "ptc-bath-heater.ventilation", "ptc-bath-heater.target-temperature",
 )
 # Bump when the property whitelist changes so saved reports rediscover accessories once.
-ACCESSORY_SCHEMA = 4
+ACCESSORY_SCHEMA = 5
 # Extra controls only for particular device kinds (other kinds may share the service name).
 # (insert after, address): None puts the control first.
 KIND_ADDRESSES = {
@@ -124,14 +127,15 @@ def accessory_props(spec, kind=None):
     for after, address in reversed(KIND_ADDRESSES.get(kind or XiaomiCloud.kind(spec.get("type")), ())):
         controls.insert(controls.index(after) + 1 if after in controls else 0, address)
     controls = tuple(controls)
-    for address in controls + READING_ADDRESSES:
+    readings = READING_ADDRESSES + KIND_READINGS.get(kind or XiaomiCloud.kind(spec.get("type")), ())
+    for address in controls + readings:
         service, prop = XiaomiCloud.find_property(spec, address)
         if not prop:
             continue
         access = prop.get("access", [])
         if address in controls and "write" not in access:
             continue
-        if address in READING_ADDRESSES and "read" not in access:
+        if address in readings and address not in controls and "read" not in access:
             continue
         entry = {"address": address, "siid": service["iid"], "piid": prop["iid"],
                  "format": prop.get("format"), "readable": "read" in access,
@@ -199,7 +203,7 @@ def discover_accessories(cloud, devices, home):
         if kind not in ACCESSORY_KINDS:
             continue
         props = accessory_props(spec)
-        if not any(p["writable"] for p in props):
+        if not any(p["writable"] for p in props) and kind not in READ_ONLY_KINDS:
             continue
         accessories.append({"device": {k: device.get(k) for k in ("did", "name", "model", "isOnline")},
                             "room": cloud.device_rooms.get(did) or "其他", "kind": kind,

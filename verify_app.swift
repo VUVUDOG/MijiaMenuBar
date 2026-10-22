@@ -543,6 +543,23 @@ let hoodPurifier = AppModel.accessory(["device": ["did": "hood2", "name": "净�
 expect(AccessoryDetail(item: hoodPurifier, model: timed).label(hoodPurifier.prop("air-purifier.on")!) == "净化", "Hood purification label")
 print("Native range hood passed")
 
+// Rice cooker: status only, never switched on remotely or by turn-off / timers.
+let cookerProps: [[String: Any]] = [
+    ["address": "cooker.status", "format": "uint8", "readable": true, "writable": false,
+     "options": [["value": 1, "description": "Idle"], ["value": 2, "description": "Busy"], ["value": 4, "description": "Keep Warm"]]],
+    ["address": "cooker.cook-mode", "format": "uint8", "readable": true, "writable": false,
+     "options": [["value": 2, "description": "Cook Congee"]]],
+    ["address": "cooker.left-time", "format": "uint16", "readable": true, "writable": false, "range": [0, 1440, 1]]]
+func cooker(_ status: Int, _ left: Int) -> Accessory {
+    AppModel.accessory(["device": ["did": "cook", "name": "电饭煲", "isOnline": true], "room": "厨房", "kind": "cooker", "group": false,
+        "props": cookerProps, "state": ["cooker.status": status, "cooker.cook-mode": 2, "cooker.left-time": left]])!
+}
+expect(AccessoryDetail.summary(cooker(1, 0)) == "待机" && cooker(1, 0).isOn == false, "Idle cooker")
+expect(AccessoryDetail.summary(cooker(2, 25)) == "烹饪中 · 煮粥 · 剩余 25 分钟" && cooker(2, 25).isOn == true, "Cooking cooker")
+expect(AccessoryDetail.summary(cooker(4, 99)) == "保温中 · 煮粥", "Keep warm shows no countdown")
+expect(timed.offChanges(cooker(2, 25)).isEmpty && !AppModel.timerEligible(cooker(2, 25))
+    && AccessoryDetail.controls(cooker(2, 25)).isEmpty, "A cooker has no remote controls")
+
 // Expired login: handled once, shows the notice, clears after a successful sign-in.
 let expiredModel = AppModel(worker: fakeWorker, runtime: testRuntime.appendingPathComponent("expired-test"))
 var expiryCalls = 0
