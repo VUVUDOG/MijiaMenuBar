@@ -35,7 +35,8 @@ enum IntentBridge {
     static func devices() -> [DeviceEntity] {
         guard let model = AppModel.shared else { return [] }
         let climates = model.rooms.map { DeviceEntity(id: $0.id, name: $0.name, room: $0.area) }
-        let items = model.accessories.map { DeviceEntity(id: $0.id, name: $0.name, room: $0.room) }
+        // Cookers are not offered: starting one needs the on-screen confirmation.
+        let items = model.accessories.filter { $0.kind != "cooker" }.map { DeviceEntity(id: $0.id, name: $0.name, room: $0.room) }
         return (climates + items).sorted { ($0.room, $0.name) < ($1.room, $1.name) }
     }
 

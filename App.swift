@@ -62,6 +62,7 @@ struct Accessory: Identifiable {
     let online: Bool
     let props: [AccessoryProp]
     var values: [String: AnyHashable]
+    var actions: [String] = []
 
     static let primaryAddress = ["light": "light.on", "outlet": "switch.on", "fan": "fan.on", "air-purifier": "air-purifier.on",
                                  "hood": "hood.on"]
@@ -104,6 +105,9 @@ final class AppModel: ObservableObject {
     @Published var inFlight: [String: [String: AnyHashable]]?
     var failedIDs: Set<String>?
     var cancelledRefresh: Process?
+    // A device action (start / stop cooking) waiting for the worker to be free.
+    var pendingAction: (id: String, name: String, inputs: [Int])?
+    @Published var actionRunning: String?
     // Called once when Xiaomi reports the login token as expired; the app opens the QR sign-in.
     var onSessionExpired: (() -> Void)?
     var expiryHandled = false
@@ -381,7 +385,7 @@ final class AppModel: ObservableObject {
         }
         return Accessory(id: did, name: device["name"] as? String ?? "设备", room: item["room"] as? String ?? "其他",
                          kind: kind, group: item["group"] as? Bool ?? false, online: device["isOnline"] as? Bool ?? true,
-                         props: props, values: values)
+                         props: props, values: values, actions: (item["actions"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String })
     }
 
     static func optionLabel(_ text: String) -> String {
@@ -393,7 +397,8 @@ final class AppModel: ObservableObject {
                    "busy": "烹饪中", "delay": "预约中", "keep warm": "保温中", "error": "故障", "updating": "升级中",
                    "cooking completed": "已完成", "fine cook": "精煮", "quick cook": "快煮", "cook congee": "煮粥",
                    "rewarming": "热饭", "delicious soup": "煲汤", "multigrain rice": "杂粮饭", "optional": "自选",
-                   "grain congee": "杂粮粥"]
+                   "grain congee": "杂粮粥", "soft": "软", "middle": "适中", "hard": "硬",
+                   "1 minute": "1 分钟", "3 minutes": "3 分钟", "5 minutes": "5 分钟"]
         return map[text.lowercased()] ?? text
     }
 
@@ -737,8 +742,23 @@ final class AppModel: ObservableObject {
             .flatMap { String(data: $0, encoding: .utf8) }
     }
 
+    // Run a whitelisted device action. Not optimistic: the result is shown once the device confirms it.
+    func act(_ id: String, _ name: String, inputs: [Int] = []) {
+        guard let item = accessories.first(where: { $0.id == id }), item.online, item.actions.contains(name) else { return }
+        pendingAction = (id, name, inputs)
+        actionRunning = id
+        scheduleFlush(after: 0.05)
+    }
+
     func flush() {
         flushWork = nil
+        if let action = pendingAction, inFlight == nil, !busy {
+            pendingAction = nil
+            let label = action.name == "start-cook" ? "正在启动烹饪…" : "正在停止烹饪…"
+            run(arguments: ["--act", action.id, action.name] + (action.inputs.isEmpty ? [] : [Self.json(action.inputs) ?? "[]"]), label: label)
+            if !active { actionRunning = nil }
+            return
+        }
         guard inFlight == nil, !busy, !pending.isEmpty else { return }
         let batch = pending.filter { displayName($0.key) != nil }
         pending = [:]
@@ -767,6 +787,8 @@ final class AppModel: ObservableObject {
     // the panel returns to the last confirmed state. Newer intents still go out.
     func workerFinished() {
         guard !active else { return }
+        actionRunning = nil
+        if pendingAction != nil { scheduleFlush(after: 0.05) }
         if let batch = inFlight {
             inFlight = nil
             if phase != "complete" {
@@ -1478,7 +1500,10 @@ struct ControlView: View {
                     }
                 }
                 Spacer(minLength: 0)
-            }.contentShape(Rectangle()).onTapGesture { if item.online { model.quickToggle(item) } }
+            }.contentShape(Rectangle()).onTapGesture {
+                guard item.online else { return }
+                if item.kind == "cooker" { detailID = detailID == key ? nil : key } else { model.quickToggle(item) }
+            }
             if hasControls && !favorites {
                 Button { detailID = detailID == key ? nil : key } label: {
                     Image(systemName: "slider.horizontal.3").font(.system(size: 9, weight: .semibold))
@@ -1678,6 +1703,59 @@ func symbol(_ name: String, fallback: String) -> String {
     NSImage(systemSymbolName: name, accessibilityDescription: nil) == nil ? fallback : name
 }
 
+// Rice cooker: pick a cooking mode and start it (needs a second tap), or stop what is running.
+struct CookerPanel: View {
+    let item: Accessory
+    @ObservedObject var model: AppModel
+    @State private var mode: Int?
+    @State private var confirming = false
+
+    var modes: [ControlOption] { item.prop("cooker.cook-mode")?.options ?? [] }
+    var status: Int { Int(item.number("cooker.status") ?? 1) }
+    var running: Bool { [2, 3, 4].contains(status) }
+    var selected: Int? { mode ?? item.number("cooker.cook-mode").map { Int($0) } ?? modes.first?.id }
+    var modeName: String { modes.first { $0.id == selected }?.label ?? "" }
+    var busy: Bool { model.actionRunning == item.id }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("烹饪模式").font(.system(size: 11)).foregroundStyle(.secondary).frame(height: 14)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 4), spacing: 5) {
+                ForEach(modes) { option in
+                    let on = selected == option.id
+                    Button { mode = option.id; confirming = false } label: {
+                        Text(option.label).font(.system(size: 10.5, weight: .medium)).lineLimit(1).minimumScaleFactor(0.7)
+                            .foregroundStyle(on ? ControlView.accent : Color.primary.opacity(0.65))
+                            .frame(maxWidth: .infinity).frame(height: 22).modifier(Surface(selected: on, radius: 7))
+                    }.buttonStyle(.plain)
+                }
+            }.frame(height: 49, alignment: .top)
+            Text(running ? "正在工作，可随时停止" : "开始前请确认锅内已放好米和水").font(.system(size: 10))
+                .foregroundStyle(running ? Color.secondary : Color.orange).frame(height: 14)
+            HStack(spacing: 8) {
+                Button {
+                    if confirming {
+                        confirming = false
+                        if let id = selected { model.act(item.id, "start-cook", inputs: [id]) }
+                    } else {
+                        confirming = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { confirming = false }
+                    }
+                } label: {
+                    Text(confirming ? "确认开始「\(modeName)」" : "开始烹饪").font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        .foregroundStyle(confirming ? ControlView.onAccent : Color.primary.opacity(0.8))
+                        .frame(maxWidth: .infinity).frame(height: 28)
+                        .background(confirming ? ControlView.accent : Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
+                }.buttonStyle(.plain).disabled(running || busy || selected == nil)
+                Button { model.act(item.id, "cancel-cooking") } label: {
+                    Text("停止烹饪").font(.system(size: 11, weight: .semibold)).foregroundStyle(running ? ControlView.alarm : Color.primary.opacity(0.35))
+                        .frame(maxWidth: .infinity).frame(height: 28).modifier(Surface(radius: 9))
+                }.buttonStyle(.plain).disabled(!running || busy)
+            }.frame(height: 28).overlay { if busy { ProgressView().controlSize(.small) } }
+        }
+    }
+}
+
 // "Switch off in 1 / 2 / 4 hours", or the countdown with a cancel button.
 // Reorders tiles live while one is dragged over another; keys of favourites carry a "fav-" prefix.
 struct TileDrop: DropDelegate {
@@ -1747,9 +1825,12 @@ struct AccessoryDetail: View {
         if !prop.options.isEmpty { return prop.options.count > 4 ? 66 : 44 }
         return 42
     }
+    // Mode chips (2 rows), a safety note, and the start / stop buttons.
+    static let cookerPanelHeight: CGFloat = 14 + 49 + 14 + 28 + 3 * 8
     static func height(_ item: Accessory) -> CGFloat {
         let parts = controls(item)
         var heights = parts.map(controlHeight)
+        if item.kind == "cooker" && !item.actions.isEmpty { heights.insert(cookerPanelHeight, at: 0) }
         if AppModel.timerEligible(item) { heights.append(TimerRow.height) }
         return 20 + heights.reduce(0, +) + CGFloat(max(heights.count - 1, 0)) * 8
     }
@@ -1780,12 +1861,14 @@ struct AccessoryDetail: View {
         }()
         if field == "on" { return ["light": "照明", "fan": "风扇", "switch": "电源", "air-purifier": "电源", "hood": "电源"][service] ?? "开关" }
         return ["brightness": "亮度", "color-temperature": "色温", "target-position": "开合", "fan-level": "风速",
+                "texture": "口感", "keep-warm-time": "保温时间", "target-time": "目标时间", "auto-screen-off-time": "自动熄屏",
                 "mode": "模式", "ventilation": "换气", "horizontal-swing": "摇头", "target-temperature": "目标温度", "motor-control": "窗帘"][field] ?? field
     }
 
     func formatted(_ prop: AccessoryProp, _ value: Double) -> String {
         if prop.address.hasSuffix("color-temperature") { return "\(Int(value))K" }
         if prop.address.hasSuffix("target-temperature") { return "\(Int(value))°" }
+        if prop.address.hasSuffix("keep-warm-time") || prop.address.hasSuffix("cooker.target-time") { return "\(Int(value)) 分钟" }
         return "\(Int(value))%"
     }
 
@@ -1839,6 +1922,9 @@ struct AccessoryDetail: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            if item.kind == "cooker" && !item.actions.isEmpty {
+                CookerPanel(item: item, model: model).frame(height: Self.cookerPanelHeight)
+            }
             ForEach(Self.controls(item), id: \.address) { prop in control(prop).frame(height: Self.controlHeight(prop)) }
             if AppModel.timerEligible(item) { TimerRow(model: model, id: item.id) }
         }.padding(.horizontal, 10).padding(.vertical, 10)
@@ -1881,7 +1967,8 @@ struct AccessoryDetail: View {
                 }
             }
         } else if let range = prop.range, range.count == 3, range[1] > range[0] {
-            let step = prop.address.hasSuffix("color-temperature") ? max(range[2], 100) : range[2]
+            let minutes = prop.address.hasSuffix("keep-warm-time") || prop.address.hasSuffix("cooker.target-time")
+            let step = prop.address.hasSuffix("color-temperature") ? max(range[2], 100) : minutes ? max(range[2], 10) : range[2]
             let current = drafts[prop.address] ?? item.number(prop.address) ?? range[0]
             VStack(alignment: .leading, spacing: 2) {
                 HStack {

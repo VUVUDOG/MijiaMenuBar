@@ -543,6 +543,7 @@ let hoodPurifier = AppModel.accessory(["device": ["did": "hood2", "name": "净�
 expect(AccessoryDetail(item: hoodPurifier, model: timed).label(hoodPurifier.prop("air-purifier.on")!) == "净化", "Hood purification label")
 print("Native range hood passed")
 
+
 // Rice cooker: status only, never switched on remotely or by turn-off / timers.
 let cookerProps: [[String: Any]] = [
     ["address": "cooker.status", "format": "uint8", "readable": true, "writable": false,
@@ -559,6 +560,60 @@ expect(AccessoryDetail.summary(cooker(2, 25)) == "烹饪中 · 煮粥 · 剩余 
 expect(AccessoryDetail.summary(cooker(4, 99)) == "保温中 · 煮粥", "Keep warm shows no countdown")
 expect(timed.offChanges(cooker(2, 25)).isEmpty && !AppModel.timerEligible(cooker(2, 25))
     && AccessoryDetail.controls(cooker(2, 25)).isEmpty, "A cooker has no remote controls")
+
+// Rice cooker controls: configuration options, start / stop actions, panel height.
+let cookerFullProps: [[String: Any]] = cookerProps + [
+    ["address": "cooker.texture", "format": "uint8", "readable": true, "writable": true,
+     "options": [["value": 0, "description": "Soft"], ["value": 1, "description": "Middle"], ["value": 2, "description": "Hard"]]],
+    ["address": "cooker.keep-warm-time", "format": "uint16", "readable": true, "writable": true, "range": [0, 1440, 1]],
+    ["address": "screen.auto-screen-off-time", "format": "uint8", "readable": true, "writable": true,
+     "options": [["value": 1, "description": "1 Minute"], ["value": 3, "description": "3 Minutes"]]]]
+let cookerWithModes: [[String: Any]] = (cookerFullProps.map { prop -> [String: Any] in
+    guard prop["address"] as? String == "cooker.cook-mode" else { return prop }
+    var copy = prop
+    copy["options"] = ["Fine Cook", "Quick Cook", "Cook Congee", "Rewarming", "Delicious Soup", "Multigrain Rice", "Optional", "Grain Congee"]
+        .enumerated().map { ["value": $0.offset, "description": $0.element] }
+    return copy
+})
+func fullCooker(_ status: Int) -> Accessory {
+    AppModel.accessory(["device": ["did": "cook", "name": "电饭煲", "isOnline": true], "room": "厨房", "kind": "cooker", "group": false,
+        "props": cookerWithModes, "actions": [["name": "start-cook"], ["name": "cancel-cooking"]],
+        "state": ["cooker.status": status, "cooker.cook-mode": 2, "cooker.left-time": 10, "cooker.texture": 1, "cooker.keep-warm-time": 120,
+                  "screen.auto-screen-off-time": 3]])!
+}
+let cookerItem = fullCooker(1)
+expect(AccessoryDetail.controls(cookerItem).map(\.address) == ["cooker.texture", "cooker.keep-warm-time", "screen.auto-screen-off-time"],
+    "Cooker offers texture, keep-warm time and screen timeout")
+let cookerDetail = NSHostingView(rootView: AccessoryDetail(item: cookerItem, model: timed).frame(width: 344))
+let cookerFitting = cookerDetail.fittingSize.height
+expect(abs(cookerFitting - AccessoryDetail.height(cookerItem)) <= 1,
+    "Cooker detail height: \(AccessoryDetail.height(cookerItem)) vs \(cookerFitting)")
+expect(AccessoryDetail.summary(cookerItem) == "待机", "Idle cooker summary still reads idle")
+
+// Actions are queued once and only for devices that offer them.
+let cookRuntime = testRuntime.appendingPathComponent("cooker-test")
+try FileManager.default.createDirectory(at: cookRuntime, withIntermediateDirectories: true)
+try seedAuthenticated(runtime: cookRuntime)
+try saveFixture("report.json", ["devices": [["device": ["did": "test-room", "name": "空调"], "room": "厨房", "spec": controlSpec, "state": controlState]],
+    "accessories": [["device": ["did": "cook", "name": "电饭煲", "isOnline": true], "room": "厨房", "kind": "cooker", "group": false,
+                     "props": cookerWithModes, "actions": [["name": "start-cook"], ["name": "cancel-cooking"]],
+                     "state": ["cooker.status": 1]]]], runtime: cookRuntime)
+let cooking = AppModel(worker: URL(fileURLWithPath: CommandLine.arguments[2]), runtime: cookRuntime,
+    credentialReader: { _ in (errSecSuccess, testSessionData) })
+func cookerCalls() -> [[String]] {
+    guard let text = try? String(contentsOf: cookRuntime.appendingPathComponent("controls.jsonl"), encoding: .utf8) else { return [] }
+    return text.split(separator: "\n").map { try! JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String] }
+}
+cooking.act("cook", "factory-reset")
+cooking.act("lamp", "start-cook")
+expect(cooking.pendingAction == nil, "Unknown actions and devices are ignored")
+cooking.act("cook", "start-cook", inputs: [2])
+expect(cooking.actionRunning == "cook", "A started action shows progress")
+settleQueue(cooking)
+let actArgs = cookerCalls().last ?? []
+expect(Array(actArgs.prefix(4)) == ["--act", "cook", "start-cook", "[2]"] && cooking.actionRunning == nil, "Start passes the mode: \(actArgs)")
+cooking.act("cook", "cancel-cooking"); settleQueue(cooking)
+expect(Array((cookerCalls().last ?? []).prefix(3)) == ["--act", "cook", "cancel-cooking"], "Stop sends no inputs")
 
 // Expired login: handled once, shows the notice, clears after a successful sign-in.
 let expiredModel = AppModel(worker: fakeWorker, runtime: testRuntime.appendingPathComponent("expired-test"))

@@ -31,7 +31,7 @@ if (runtime / "deny-keychain").exists():
 if "--refresh" in sys.argv and (runtime / "slow-refresh").exists():
     import time
     time.sleep(5)
-if "--field" in sys.argv or "--batch" in sys.argv:
+if "--field" in sys.argv or "--batch" in sys.argv or "--act" in sys.argv:
     with (runtime / "controls.jsonl").open("a") as log:
         log.write(json.dumps(sys.argv[1:]) + "\\n")
     if (runtime / "fail-control").exists():

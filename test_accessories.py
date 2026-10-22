@@ -159,5 +159,46 @@ class AccessoryTests(unittest.TestCase):
         self.assertEqual([a["kind"] for a in found], ["cooker"])
 
 
+    def cooker_report(self, online=True):
+        props = [{"address": "cooker.status", "siid": 2, "piid": 1, "readable": True, "writable": False},
+                 {"address": "cooker.cook-mode", "siid": 2, "piid": 4, "readable": True, "writable": False,
+                  "options": [{"value": 0, "description": "Fine Cook"}, {"value": 2, "description": "Cook Congee"}]}]
+        return {"accessories": [{"device": {"did": "cook", "isOnline": online}, "kind": "cooker", "props": props, "state": {},
+                                 "actions": [{"name": "start-cook", "siid": 2, "aiid": 1, "in": [4]},
+                                             {"name": "cancel-cooking", "siid": 2, "aiid": 2, "in": []}]}]}
+
+    def test_cooker_actions_are_validated_sent_and_confirmed(self):
+        cloud = XiaomiCloud({"user_id": "u", "ssecurity": "s", "service_token": "t"})
+        calls, status = [], {"value": 1}
+        cloud.call_action = lambda device, siid, aiid, values: calls.append((siid, aiid, list(values))) or []
+        def read(cl, accessories):
+            accessories[0]["state"] = {"cooker.status": status["value"]}
+        with patch("probe.read_accessories", read), patch("probe.time.sleep"):
+            for bad in ([], [1], [0, 1]):
+                with self.assertRaises(CloudError):
+                    probe.run_action(cloud, self.cooker_report(), "cook", "start-cook", bad)
+            with self.assertRaises(CloudError):
+                probe.run_action(cloud, self.cooker_report(False), "cook", "start-cook", [2])
+            with self.assertRaises(CloudError):
+                probe.run_action(cloud, self.cooker_report(), "cook", "factory-reset", [])
+            with self.assertRaises(CloudError):  # sent, but the cooker never reports cooking
+                probe.run_action(cloud, self.cooker_report(), "cook", "start-cook", [2])
+            status["value"] = 2
+            probe.run_action(cloud, self.cooker_report(), "cook", "start-cook", [2])
+            status["value"] = 1
+            probe.run_action(cloud, self.cooker_report(), "cook", "cancel-cooking", [])
+        self.assertEqual(calls[-2:], [(2, 1, [2]), (2, 2, [])])
+
+    def test_action_request_shape(self):
+        cloud = XiaomiCloud({"user_id": "u", "ssecurity": "s", "service_token": "t"})
+        sent = []
+        cloud._request = lambda path, payload: sent.append((path, payload)) or {"code": 0, "out": []}
+        cloud.call_action({"did": "d"}, 2, 1, [2])
+        self.assertEqual(sent, [("miotspec/action", {"params": {"did": "d", "siid": 2, "aiid": 1, "in": [2]}})])
+        cloud._request = lambda path, payload: {"code": -704040005}
+        with self.assertRaises(CloudError):
+            cloud.call_action({"did": "d"}, 2, 1, [])
+
+
 if __name__ == "__main__":
     unittest.main()

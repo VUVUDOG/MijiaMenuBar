@@ -106,13 +106,17 @@ CONTROL_ADDRESSES = (
     "ptc-bath-heater.mode", "ptc-bath-heater.ventilation", "ptc-bath-heater.target-temperature",
 )
 # Bump when the property whitelist changes so saved reports rediscover accessories once.
-ACCESSORY_SCHEMA = 5
+ACCESSORY_SCHEMA = 7
+# Actions a kind may run, with the status values that confirm each one.
+KIND_ACTIONS = {"cooker": {"start-cook": {2, 3}, "cancel-cooking": {1, 7}}}
 # Extra controls only for particular device kinds (other kinds may share the service name).
 # (insert after, address): None puts the control first.
 KIND_ADDRESSES = {
     "hood": ((None, "hood.on"), (None, "fan-control.fan-level")),
     # The bath heater has two fan-level properties: #1 blowing, #2 ventilation.
     "bath-heater": (("ptc-bath-heater.ventilation", "fan-control.fan-level#2"),),
+    "cooker": ((None, "cooker.texture"), (None, "cooker.keep-warm-time"), (None, "cooker.target-time"),
+               (None, "screen.auto-screen-off-time")),
 }
 READING_ADDRESSES = (
     "curtain.current-position", "power-consumption.electric-power",
@@ -180,6 +184,44 @@ def discover_alarms(cloud, devices, home):
     return alarms
 
 
+def accessory_actions(spec, kind):
+    """Whitelisted actions of the device's main service, with their input property ids."""
+    actions = []
+    for service in spec.get("services", []):
+        if XiaomiCloud.kind(service.get("type")) != kind:
+            continue
+        for action in service.get("actions", []):
+            name = XiaomiCloud.kind(action.get("type"))
+            if name in KIND_ACTIONS[kind]:
+                actions.append({"name": name, "siid": service["iid"], "aiid": action["iid"], "in": action.get("in", [])})
+    return actions
+
+
+def run_action(cloud, report, did, name, inputs):
+    """Start or stop a whitelisted action, then wait until the device state confirms it."""
+    accessory = next((a for a in report.get("accessories", []) if a["device"]["did"] == did), None)
+    action = accessory and next((a for a in accessory.get("actions", []) if a["name"] == name), None)
+    if not action or name not in KIND_ACTIONS.get(accessory["kind"], {}):
+        raise CloudError("该设备不支持这个操作")
+    if not accessory["device"].get("isOnline", True):
+        raise CloudError("设备离线，无法操作")
+    if len(inputs) != len(action["in"]):
+        raise CloudError("操作参数不正确")
+    if name == "start-cook":
+        mode = next((p for p in accessory["props"] if p["address"] == "cooker.cook-mode"), {})
+        if inputs[0] not in [o["value"] for o in mode.get("options", [])]:
+            raise CloudError("设备不支持这个烹饪模式")
+    cloud.call_action(accessory["device"], action["siid"], action["aiid"], inputs)
+    status_prop = next(p for p in accessory["props"] if p["address"] == "cooker.status")
+    expected = KIND_ACTIONS[accessory["kind"]][name]
+    for delay in (0.5, 0.5, 0.8, 0.8, 1, 1, 1, 1, 1.5, 1.5):
+        time.sleep(delay)
+        read_accessories(cloud, [accessory])
+        if accessory["state"].get("cooker.status") in expected:
+            return
+    raise CloudError("指令已发送，但暂未确认设备状态；请刷新查看")
+
+
 def choose_home(cloud, summaries):
     """The home that holds the air conditioners, otherwise the one with the most devices."""
     homes = [cloud.device_homes.get(d["did"]) for d in summaries]
@@ -205,9 +247,12 @@ def discover_accessories(cloud, devices, home):
         props = accessory_props(spec)
         if not any(p["writable"] for p in props) and kind not in READ_ONLY_KINDS:
             continue
-        accessories.append({"device": {k: device.get(k) for k in ("did", "name", "model", "isOnline")},
-                            "room": cloud.device_rooms.get(did) or "其他", "kind": kind,
-                            "group": model.startswith("mijia.light.group"), "props": props, "state": {}})
+        entry = {"device": {k: device.get(k) for k in ("did", "name", "model", "isOnline")},
+                 "room": cloud.device_rooms.get(did) or "其他", "kind": kind,
+                 "group": model.startswith("mijia.light.group"), "props": props, "state": {}}
+        if kind in KIND_ACTIONS:
+            entry["actions"] = accessory_actions(spec, kind)
+        accessories.append(entry)
     return accessories
 
 
@@ -264,6 +309,7 @@ def main(argv=None):
     parser.add_argument("--field", action="append",
                         help="控制属性（空调字段或配件地址如 light.on），可重复；与 --value 按顺序配对")
     parser.add_argument("--scope", help="刷新时只读取该房间的配件")
+    parser.add_argument("--act", nargs="+", metavar=("设备", "动作"), help="运行设备动作：设备标识 动作名 [JSON 参数]")
     parser.add_argument("--alarms", action="store_true", help="只读取水浸传感器（后台定时检查）")
     parser.add_argument("--batch", help="JSON：{设备标识: {属性: 值}}，多个设备并行控制")
     parser.add_argument("--value", action="append", help="JSON 控制值，可重复")
@@ -317,7 +363,7 @@ def main(argv=None):
             # The native app captures this pipe privately. No credentials go in
             # argv, environment, logs, status.json or other runtime files.
             print(json.dumps({"generation": store.generation, "session": cloud.credentials}), flush=True)
-        if args.batch or args.room or args.field or args.value or args.refresh or args.alarms:
+        if args.act or args.batch or args.room or args.field or args.value or args.refresh or args.alarms:
             if not (RUNTIME / "report.json").exists():
                 raise CloudError("请先同步空调设备")
             report = json.loads((RUNTIME / "report.json").read_text())
@@ -338,6 +384,15 @@ def main(argv=None):
                 except (CloudError, requests.RequestException, ValueError, KeyError):
                     pass
             targets = report["devices"]
+            if args.act:
+                if len(args.act) < 2:
+                    raise CloudError("设备操作缺少设备或动作")
+                status("controlling", "正在发送指令并确认设备状态…")
+                run_action(cloud, report, args.act[0], args.act[1], json.loads(args.act[2]) if len(args.act) > 2 else [])
+                report["read_at"] = time.time()
+                write_json("report.json", report)
+                status("complete", "指令已执行，设备状态已确认")
+                return 0
             if args.batch or args.room or args.field or args.value:
                 if args.batch:
                     commands = json.loads(args.batch)

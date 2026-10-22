@@ -157,6 +157,15 @@ class XiaomiCloud:
             resolved.append((service, prop, value))
         return self._apply(device, resolved, "设备控制未成功")
 
+    def call_action(self, device, siid, aiid, values):
+        """Run a MIoT action (e.g. start / stop cooking). Returns the device's output list."""
+        result = self._request("miotspec/action", {"params": {"did": device["did"], "siid": siid, "aiid": aiid,
+                                                               "in": list(values)}})
+        if not isinstance(result, dict) or result.get("code") not in (0, 1):
+            code = result.get("code", "unknown") if isinstance(result, dict) else "unknown"
+            raise CloudError(f"设备操作未成功（code={code}）")
+        return result.get("out") or []
+
     def set_stored(self, device, props, values):
         """Accessory control from the property metadata saved at sync time (no spec download)."""
         by_address = {p["address"]: p for p in props}
