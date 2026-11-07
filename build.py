@@ -10,11 +10,12 @@ from pathlib import Path
 root = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
 parser.add_argument("--worker", action="store_true", help="重新打包云端运行环境")
-parser.add_argument("--arch", choices=["arm64", "x86_64"], default=platform.machine(), help="目标 Mac 架构，需要使用对应架构的 Python")
 args = parser.parse_args()
-if platform.machine() != args.arch:
-    parser.error("云端运行环境必须使用对应架构的 Python 构建；当前 Python 为 " + platform.machine())
-output = root / "dist" if args.arch == "arm64" else root / "dist" / "intel"
+# Apple Silicon only (native arm64). Intel Macs are no longer supported.
+args.arch = "arm64"
+if platform.machine() != "arm64":
+    parser.error("只支持在 Apple Silicon（M 系列）上用 arm64 Python 构建；当前 Python 为 " + platform.machine())
+output = root / "dist"
 work = root / ".build" / args.arch
 bundle = output / "MijiaMenuBar.app"
 macos = bundle / "Contents" / "MacOS"
@@ -34,9 +35,9 @@ if args.worker or not (worker / "CloudWorker").exists():
     shutil.copytree(output / "worker" / "CloudWorker", worker, symlinks=True)
 info = {"CFBundleIdentifier": "local.hitachi.menubar", "CFBundleName": "米家菜单栏", "CFBundleDisplayName": "米家菜单栏",
         "CFBundleExecutable": "MijiaMenuBar", "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "0.8.1", "CFBundleVersion": "32",
+        "CFBundleShortVersionString": "0.9.0", "CFBundleVersion": "33",
         "LSUIElement": True, "NSHighResolutionCapable": True,
-        "LSMinimumSystemVersion": "13.0"}
+        "LSMinimumSystemVersion": "13.0", "LSArchitecturePriority": ["arm64"]}
 with (bundle / "Contents" / "Info.plist").open("wb") as output:
     plistlib.dump(info, output)
 # Compile the app, then generate the App Intents metadata (Shortcuts actions) the way

@@ -6,8 +6,7 @@ import tempfile
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
-for architecture, application in (("arm64", root / "dist/MijiaMenuBar.app"),
-                                  ("x86_64", root / "dist/intel/MijiaMenuBar.app")):
+for architecture, application in (("arm64", root / "dist/MijiaMenuBar.app"),):
     worker = application / "Contents/Resources/CloudWorker/CloudWorker"
     with tempfile.TemporaryDirectory(prefix="hitachi-package-test-") as temporary:
         runtime = Path(temporary)
@@ -35,3 +34,17 @@ for architecture, application in (("arm64", root / "dist/MijiaMenuBar.app"),
             assert not (runtime / "report.json").exists()
             assert not (runtime / "login.png").exists()
         print(architecture + ": packaged private session pipe, no Keychain fallback, refresh/logout passed")
+
+# Every executable in the app must be native Apple Silicon only (no Intel or universal slices).
+application = root / "dist/MijiaMenuBar.app"
+binaries = 0
+for path in application.rglob("*"):
+    if not path.is_file() or not os.access(path, os.X_OK):
+        continue
+    archs = subprocess.run(["lipo", "-archs", str(path)], capture_output=True, text=True)
+    if archs.returncode != 0:
+        continue  # not a Mach-O file (scripts, data)
+    assert archs.stdout.split() == ["arm64"], f"{path.relative_to(application)} is {archs.stdout.strip()}"
+    binaries += 1
+assert binaries > 0
+print(f"arm64 only: {binaries} executables checked")

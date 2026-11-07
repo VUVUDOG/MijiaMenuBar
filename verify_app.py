@@ -7,7 +7,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser()
-parser.add_argument("--arch", choices=["arm64", "x86_64"], default="arm64")
+parser.add_argument("--arch", choices=["arm64"], default="arm64")
 args = parser.parse_args()
 with tempfile.TemporaryDirectory(prefix="hitachi-native-test-") as temporary:
     temporary = Path(temporary)

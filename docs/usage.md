@@ -2,7 +2,7 @@
 
 > **第三方工具，非小米官方。**
 
-[下载最新版](https://github.com/VUVUDOG/MijiaMenuBar/releases/latest)。本说明对应 **v0.8.1**；截图沿用 v0.3.4 界面（演示数据），早于全屋设备、场景和新版面，仅供参考。
+[下载最新版](https://github.com/VUVUDOG/MijiaMenuBar/releases/latest)。本说明对应 **v0.9.0**；截图沿用 v0.3.4 界面（演示数据），早于全屋设备、场景和新版面，仅供参考。
 
 ## 1. 准备
 
@@ -10,7 +10,7 @@
 
 ## 2. 安装
 
- → 关于本机：M 系列选择 `arm64.zip`，Intel 选择 `intel.zip`。要求 macOS 13+。
+只支持 Apple Silicon（M 系列）Mac，下载 `arm64.zip`，要求 macOS 13+。可在  → 关于本机查看芯片；Intel Mac 请使用 v0.8.1（不再更新）。
 
 解压，将 `MijiaMenuBar.app` 放入应用程序并打开。当前未公证，若系统提示无法验证开发者，确认来源后在「系统设置 → 隐私与安全性」选择「仍要打开」。
 

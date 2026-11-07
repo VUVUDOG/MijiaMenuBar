@@ -579,11 +579,7 @@ final class AppModel: ObservableObject {
     func forgetSession() { sessionData = nil; sessionGeneration = nil }
 
     var diagnosticSummary: String {
-        #if arch(arm64)
         let architecture = "arm64"
-        #else
-        let architecture = "x86_64"
-        #endif
         let value: [String: Any] = ["version": Self.version, "architecture": architecture,
             "process_id": ProcessInfo.processInfo.processIdentifier,
             "keychain_reads": keychainReads, "worker_requests": workerRequests,
@@ -970,11 +966,8 @@ final class AppModel: ObservableObject {
 final class Updater: ObservableObject {
     static let shared = Updater()
     static let repository = "VUVUDOG/MijiaMenuBar"
-    #if arch(arm64)
+    // Only Apple Silicon builds are published.
     static let assetSuffix = "arm64"
-    #else
-    static let assetSuffix = "intel"
-    #endif
 
     @Published var latest: String?
     @Published var state = "idle"   // idle, checking, downloading, installing

@@ -14,8 +14,9 @@
 
 | Mac 类型 | 下载 |
 | --- | --- |
-| Apple Silicon（M 系列） | [arm64.zip](https://github.com/VUVUDOG/MijiaMenuBar/releases/download/v0.8.1/MijiaMenuBar-0.8.1-arm64.zip) |
-| Intel 处理器 | [intel.zip](https://github.com/VUVUDOG/MijiaMenuBar/releases/download/v0.8.1/MijiaMenuBar-0.8.1-intel.zip) |
+| Apple Silicon（M 系列） | [arm64.zip](https://github.com/VUVUDOG/MijiaMenuBar/releases/download/v0.9.0/MijiaMenuBar-0.9.0-arm64.zip) |
+
+**v0.9.0 起只支持 Apple Silicon（M 系列）Mac**，应用为原生 arm64，不再提供 Intel 版。Intel Mac 可继续使用 [v0.8.1](https://github.com/VUVUDOG/MijiaMenuBar/releases/tag/v0.8.1)，之后不再更新。
 
 [全部版本](https://github.com/VUVUDOG/MijiaMenuBar/releases) · [安装使用说明](docs/usage.md)
 
@@ -77,7 +78,6 @@
 
 钥匙串弹窗需要当前 Mac 的「登录」钥匙串密码。选择「始终允许」可记住对当前程序的授权；更新版本可能触发重新授权。
 
-Intel 版已通过 Apple Silicon 主机上的 Rosetta 验证，尚未在实体 Intel Mac 上实测。
 
 ## 源码构建
 
@@ -92,26 +92,17 @@ uv run python build.py --worker
 
 输出 `dist/MijiaMenuBar.app`。仅修改 Swift 界面后可运行 `uv run python build.py`；云端代码变更后需要 `--worker`。
 
-在 Apple Silicon 主机上构建 Intel 版，需要 Rosetta 和独立的 x86_64 Python：
-
-```sh
-uv python install cpython-3.12.13-macos-x86_64-none
-UV_PROJECT_ENVIRONMENT=.venv-intel uv sync --frozen --python cpython-3.12.13-macos-x86_64-none
-.venv-intel/bin/python build.py --arch x86_64 --worker
-```
-
-输出 `dist/intel/MijiaMenuBar.app`。必须使用与目标架构对应的 Python 构建。
+只支持在 Apple Silicon 上构建，产物为原生 arm64。
 
 ## 验证与反馈
 
 ```sh
 uv run python -m unittest -v
 uv run python verify_app.py
-.venv-intel/bin/python verify_app.py --arch x86_64
 uv run python verify_packages.py
 ```
 
-单元测试与原生回归使用临时目录、模拟钥匙串和模拟会话，不控制真实设备；设备列表的布局测试使用 `docs/fixtures/accessories.json` 中匿名化的设备功能定义。打包检查要求两种架构已构建。
+单元测试与原生回归使用临时目录、模拟钥匙串和模拟会话，不控制真实设备；设备列表的布局测试使用 `docs/fixtures/accessories.json` 中匿名化的设备功能定义。打包检查会确认安装包内所有可执行文件都只含 arm64。
 
 `verify_control.py` 是真实设备集成检查，会调节指定关机房间的空调设定温度并恢复，仅在需要真实设备验证时手动运行。
 
